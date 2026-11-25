@@ -145,6 +145,8 @@ target repo (private)                              factory repo (public)
 | `.github/workflows/board-sweep.yml`, `scripts/board/` | Board sweep (cron): syncs the Projects board from target-repo labels ([§9](#9-bookkeeping-jobs)) |
 | rotation reminder workflow (monthly cron) | Opens a "rotate credentials" issue ([§4](#4-identity-and-secrets)) |
 | `docs/opt-in.md` | What a target repo must, should and may contain |
+| `.github/workflows/ci.yml`, `scripts/check` | The factory repo's own checks: script tests, conventions, shellcheck, actionlint |
+| `scripts/run-report` | Local: digests a run's transcript and outcome artifacts, since the Actions log hides the agent's conversation |
 
 ## 4. Identity and secrets
 
@@ -324,7 +326,7 @@ In order:
      - fits no class → Stop, "not actionable"
    - runs the `## Checks` commands
    - finishes with `factory:pr`, which writes `pr-body.md`
-   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason. It also carries the ticket class, the skills called and the unrelated issues noticed, which a deterministic step (`scripts/implementer/run-summary`) writes to the job summary, resolving each skill to the factory commit or the target repo's override that ran
+   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason. It also carries the ticket class, the skills called and the unrelated issues noticed, which a deterministic step (`scripts/implementer/run-summary`) writes to the job summary. The skills listed are the Skill tool calls in the transcript (`execution_file`), each resolved to the factory commit or the target repo's override that ran; an agent list that differs is flagged, and the agent's own list is used only when the transcript can't be read
 8. **Deterministic steps act on the outcome.** The agent never touches labels.
    - **`done`:**
      - Check that `pr-body.md` contains `Closes #<n>` and the headings **Summary**, **Evidence** and **Merge Danger**. If anything is missing, the run counts as failed.
