@@ -1,0 +1,7 @@
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      # The `job` context does have these; every implementer and review run
+      # uses them to check out the factory plugin. actionlint's schema predates
+      # them.
+      - 'property "workflow_(repository|sha)" is not defined'

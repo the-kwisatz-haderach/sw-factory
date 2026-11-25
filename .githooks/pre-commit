@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Usage: enabled once per clone with `git config core.hooksPath .githooks`.
+# Runs the factory repo's checks before every commit; `git commit --no-verify`
+# skips them, and CI runs them again anyway.
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/scripts/check"

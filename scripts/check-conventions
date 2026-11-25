@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Usage: check-conventions [<repo-root>]
+# Checks the mechanical conventions of the factory's scripts (CODING_STANDARDS.md
+# holds the judgement calls), naming each violation. Every file under scripts/:
+# - with a shebang is executable; without one, it's data and isn't.
+# - a script outside scripts/test/ has a `# Usage:` line in its header comment
+#   and runs under `set -euo pipefail`.
+# - a scripts/test/*.test.sh file sources lib.sh and ends with `finish`.
+# scripts/test/lib.sh and scripts/test/run are the harness, exempt from the
+# last two. Exits 1 if anything is named.
+set -euo pipefail
+root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$root"
+violations=0
+name() { echo "$1: $2"; violations=$((violations + 1)); }
+
+while IFS= read -r f; do
+  if head -1 "$f" | grep -q '^#!'; then
+    [ -x "$f" ] || name "$f" "has a shebang but isn't executable"
+  else
+    [ ! -x "$f" ] || name "$f" "executable but has no shebang"
+    continue
+  fi
+  case "$f" in
+    scripts/test/lib.sh|scripts/test/run) ;;
+    scripts/test/*.test.sh)
+      grep -q 'lib\.sh' "$f" || name "$f" "doesn't source lib.sh"
+      [ "$(tail -1 "$f")" = "finish" ] || name "$f" "doesn't end with 'finish'"
+      ;;
+    *)
+      # The header: the comment block right after the shebang.
+      awk 'NR > 1 && !/^#/ { exit } /^# Usage:/ { found = 1 } END { exit !found }' "$f" \
+        || name "$f" "no '# Usage:' line in its header"
+      grep -qx 'set -euo pipefail' "$f" || name "$f" "no 'set -euo pipefail'"
+      ;;
+  esac
+done < <(find scripts -type f | sort)
+
+[ "$violations" -eq 0 ]

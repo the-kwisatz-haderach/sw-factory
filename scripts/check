@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Usage: check
+# The factory repo's own checks, run by CI (.github/workflows/ci.yml) and the
+# pre-commit hook (.githooks/pre-commit): the script tests, the mechanical
+# conventions, shellcheck on every script, and actionlint on the workflows.
+# A linter that isn't installed runs from its Docker image; with neither, it
+# is skipped with a warning locally and fails the check in CI.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+status=0
+step() { echo "== $1"; }
+
+# linter <name> <docker-image> <args...>: runs the linter on the repo.
+linter() {
+  local name="$1" image="$2"; shift 2
+  if command -v "$name" > /dev/null; then
+    "$name" "$@"
+  elif command -v docker > /dev/null && docker info > /dev/null 2>&1; then
+    docker run --rm -v "$root:/mnt:ro" -w /mnt "$image" "$@"
+  elif [ -n "${CI:-}" ]; then
+    echo "$name is not installed." >&2
+    return 1
+  else
+    echo "warning: $name skipped: neither it nor Docker is available." >&2
+  fi
+}
+
+step "tests"
+scripts/test/run > /tmp/factory-check-tests.$$ 2>&1 || { grep -E '^==|FAIL' /tmp/factory-check-tests.$$; status=1; }
+rm -f /tmp/factory-check-tests.$$
+
+step "conventions"
+scripts/check-conventions || status=1
+
+step "shellcheck"
+mapfile -t scripts < <(grep -rlE '^#!/usr/bin/env bash' scripts | sort)
+# Warnings and up: the info-level notes are jq and GraphQL kept in single
+# quotes on purpose, and lib.sh sourced by a computed path.
+linter shellcheck koalaman/shellcheck:stable --severity=warning -x "${scripts[@]}" || status=1
+
+step "actionlint"
+linter actionlint rhysd/actionlint:latest -no-color -oneline || status=1
+
+[ "$status" -eq 0 ] && echo "All checks passed."
+exit "$status"

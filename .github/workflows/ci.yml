@@ -1,0 +1,24 @@
+# The factory repo's own checks (scripts/check): the script tests, the
+# mechanical conventions, shellcheck and actionlint. Runs here only; target
+# repos call implementer.yml and review.yml, never this.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # shellcheck is on the runner image; actionlint runs from its Docker
+      # image. CI=true makes a missing linter fail rather than be skipped.
+      - run: scripts/check
