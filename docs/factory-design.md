@@ -190,8 +190,8 @@ Decided in [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) and
 | Ready | `agent:ready` | an allowlisted actor, which is **the only human trigger for the implementer**; or the workflow (`github-actions[bot]`) on a review fail or usage-limit re-queue |
 | In progress | `agent:in-progress` | the run's claim: it swaps out `agent:ready` with `GITHUB_TOKEN` |
 | In review | `agent:in-review` | the workflow, when it opens or updates the PR |
-| Needs human | `agent:needs-human` | the workflow acting on a `needs-human` outcome (a question or a give-up), on a failed pre-flight, or on the rework cap; always with a comment and the run link |
-| Failed | `agent:failed` | the failure follow-up job, when the run broke (timeout, crash, expired token, missing outcome file), with a comment and the run link |
+| Needs human | `agent:needs-human` | the workflow acting on a `needs-human` outcome (a question or a give-up), on a failed pre-flight, on a branch that changes `CLAUDE.md`'s `## Checks` section, or on the rework cap; always with a comment and the run link |
+| Failed | `agent:failed` | the failure follow-up job, when the run broke (timeout, cancel, crash, expired token, missing or malformed outcome file), with a comment and the run link |
 | Done | closed: merged, or closed as "not planned" | GitHub / owner |
 
 - **The way back in is always re-adding `agent:ready` on the ticket.** Comments alone never start a run, and each run reads the whole thread. Labels and comments on the PR never start an implementer run.
@@ -328,11 +328,11 @@ In order:
 8. **Deterministic steps act on the outcome.** The agent never touches labels.
    - **`done`:**
      - Check that `pr-body.md` contains `Closes #<n>` and the headings **Summary**, **Evidence** and **Merge Danger**. If anything is missing, the run counts as failed.
-     - Check that the PR leaves `CLAUDE.md`'s `## Checks` section as the default branch has it, across the whole PR, not just this run's commits. If it differs, the run counts as failed: a change to the checks lands on the default branch first.
+     - Check that the PR leaves `CLAUDE.md`'s `## Checks` section as the default branch has it, across the whole PR, not just this run's commits. If it differs, set `agent:needs-human` with the section diff and the run link, and push nothing: a retry can't pass until the change lands on the default branch or leaves the PR, whoever made it.
      - Push, then open or update the PR as `claude[bot]`, ready for review (not draft), titled with the ticket title, with the run link appended.
      - Set `agent:in-review`.
    - **`needs-human`:** post the agent's comment with the run link, and set `agent:needs-human`. No PR.
-   - **No outcome file:** the run counts as failed.
+   - **No outcome file**, an unreadable one, an unknown outcome, or a `needs-human` without a comment: the run counts as failed.
 9. **Always** (`if: always()`): upload the Langfuse trace, the transcript artifact and the job summary ([§11](#11-observability)).
 10. **Chain** after `done` or `needs-human` only ([§10](#10-brakes)).
 
@@ -588,7 +588,7 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 4 | A follow-up job with `if: failure() \|\| cancelled()` runs after a timed-out or cancelled agent job | (none given; it's the reason for the separate job) | [#10](https://github.com/the-kwisatz-haderach/sw-factory/issues/10) |
 | 5 | `claude[bot]` pushes and PRs trigger the target repo's CI and the stub's review job | (none given; the design depends on it) | [#5](https://github.com/the-kwisatz-haderach/sw-factory/issues/5) |
 | 6 | A `workflow_dispatch` fired with `GITHUB_TOKEN` (`actions: write`) starts a run, for both rework and chaining | (none given; the design depends on it) | [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11), [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
-| 7 | The exact shape of `rate_limit` and `authentication_failed` in `execution_file` | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
+| 7 | The exact shape of `rate_limit` and `authentication_failed` in `execution_file`. **`authentication_failed`, provisional ([#24](https://github.com/the-kwisatz-haderach/sw-factory/issues/24)):** the execution file is a JSON array of SDK messages, and an assistant message carries `"error": "authentication_failed"`. `scripts/implementer/auth-failed` matches the field on any object at any depth, so a different nesting still matches; confirm with the first run on an expired token. | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 8 | Counting today's implementer runs via the API when both tasks share the stub workflow (count **jobs by name**, not workflow runs) | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 9 | Langfuse Hobby over the 50k-unit cap rejects data rather than billing | — | [#16](https://github.com/the-kwisatz-haderach/sw-factory/issues/16) |
 | 10 | `gh search repos --topic` returns private repos under the sweep's classic PAT. **Answered: yes ([#38](https://github.com/the-kwisatz-haderach/sw-factory/issues/38)):** the first PAT sweep ([run 45600641172](https://github.com/the-kwisatz-haderach/sw-factory/actions/runs/45600641172)) found the private target repo. | — | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |

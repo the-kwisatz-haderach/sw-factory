@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Usage: fetch-default-claude-md <out>
+# Writes the default branch's CLAUDE.md to <out>, or removes <out> if the
+# default branch has none. Any other API error exits 1, so a network blip
+# fails the run instead of reading as a missing CLAUDE.md.
+# Needs GH_TOKEN, GH_REPO and DEFAULT_BRANCH.
+set -euo pipefail
+out="$1"
+if ! err="$(gh api -H "Accept: application/vnd.github.raw" \
+      "repos/$GH_REPO/contents/CLAUDE.md?ref=$DEFAULT_BRANCH" 2>&1 >"$out")"; then
+  rm -f "$out"
+  case "$err" in
+    *"HTTP 404"*) ;;
+    *) echo "Could not read CLAUDE.md on $DEFAULT_BRANCH: $err" >&2; exit 1 ;;
+  esac
+fi

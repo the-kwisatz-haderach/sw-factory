@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Usage: read-outcome <outcome.json> <comment-out>
+# Reads the agent's outcome file and prints `done` or `needs-human`. For
+# `needs-human` it writes the agent's question or give-up reason to
+# <comment-out>. Exits 1, so the run counts as failed, when the file is
+# missing or unreadable, the outcome is unknown, or a `needs-human` has no
+# comment.
+set -euo pipefail
+file="$1" comment_out="$2"
+[ -f "$file" ] || { echo "The agent wrote no outcome file." >&2; exit 1; }
+outcome="$(jq -r '.outcome // empty' "$file" 2>/dev/null)" \
+  || { echo "The outcome file is not valid JSON." >&2; exit 1; }
+case "$outcome" in
+  done) ;;
+  needs-human)
+    jq -r '.comment // empty' "$file" > "$comment_out"
+    if [ -z "$(tr -d '[:space:]' < "$comment_out")" ]; then
+      echo "Outcome 'needs-human' carries no comment." >&2
+      exit 1
+    fi
+    ;;
+  *) echo "Unknown outcome '${outcome:-<none>}'." >&2; exit 1 ;;
+esac
+echo "$outcome"

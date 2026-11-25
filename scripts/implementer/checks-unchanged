@@ -4,18 +4,10 @@
 # change the commands it is judged by. The rest of CLAUDE.md may change freely.
 # Prints a diff of the section and exits 1 if it changed.
 set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
 
-# A missing file has no section, so deleting CLAUDE.md counts as a change.
-section_of() { if [ -f "$1" ]; then checks_section "$1"; fi; }
-
-# The `## Checks` section: from its heading up to the next `#`/`##` heading.
-checks_section() {
-  awk '
-    /^```/ { fenced = !fenced }
-    !fenced && /^##?[[:space:]]/ { in_checks = ($0 ~ /^## Checks[[:space:]]*$/) }
-    in_checks { print }
-  ' "$1"
-}
+# A missing file or section prints nothing, so deleting either counts as a change.
+section_of() { "$here/checks-section" "$1" || true; }
 
 if ! diff -u --label "default branch" --label "this PR" \
      <(section_of "$1") <(section_of "$2"); then

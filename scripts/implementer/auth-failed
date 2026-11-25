@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Usage: auth-failed <execution-file>
+# Exits 0 if claude-code-action's execution file (a JSON array of the run's
+# SDK messages) records an `"error": "authentication_failed"`: the Claude
+# token has expired or been revoked. Exits 1 otherwise, including when the
+# file is missing or unreadable.
+#
+# The field is searched for on any message object, at any depth, so the check
+# doesn't hang on exactly where the SDK puts it. Provisional until a run with
+# an expired token confirms the shape (docs/factory-design.md §13 item 7).
+set -euo pipefail
+[ -f "${1:-}" ] || exit 1
+jq -e 'any(.. | objects; .error? == "authentication_failed")' "$1" >/dev/null 2>&1 || exit 1

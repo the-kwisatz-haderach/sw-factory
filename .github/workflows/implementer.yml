@@ -1,12 +1,19 @@
 # The implementer task (docs/factory-design.md §7), called by a target repo's
 # stub. Everything here runs in the target repo: its minutes, logs and secrets.
 #
-# Happy path only so far: an allowlisted actor adds `agent:ready`, the run
-# claims the oldest ready ticket, the agent builds it with the factory plugin,
-# and on outcome `done` the branch is pushed and the PR opened as `claude[bot]`.
-# If the ticket's branch already has an open PR, the run continues that PR
-# instead: new commits on its branch, no force-push, the body rewritten.
-# Without one, a leftover branch of the same name is deleted before the push.
+# An allowlisted actor adds `agent:ready`, the run claims the oldest ready
+# ticket, the agent builds it with the factory plugin, and on outcome `done`
+# the branch is pushed and the PR opened as `claude[bot]`. If the ticket's
+# branch already has an open PR, the run continues that PR instead: new
+# commits on its branch, no force-push, the body rewritten. Without one, a
+# leftover branch of the same name is deleted before the push.
+#
+# Every other ending leaves the ticket labelled, with a comment and the run
+# link, and pushes nothing:
+# - no `## Checks` on the default branch (pre-flight), outcome `needs-human`,
+#   or a branch that changes the `## Checks` section → `agent:needs-human`
+# - anything that breaks the run (a failed step, a missing or malformed
+#   outcome file, a timeout, a cancel) → `agent:failed`, by `report-failure`
 name: implementer
 
 on:
@@ -41,6 +48,10 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write
+    # Read by report-failure, which runs even after a timeout or a cancel.
+    outputs:
+      ticket: ${{ steps.pick.outputs.ticket }}
+      auth_failed: ${{ steps.auth.outputs.failed }}
     env:
       # Deliberately no job-level GH_TOKEN: the agent step must not inherit a
       # token it could use to touch labels. Each bookkeeping step sets its own.
@@ -66,6 +77,7 @@ jobs:
           echo "FACTORY=$RUNNER_TEMP/factory" >> "$GITHUB_ENV"
 
       - name: Pick the oldest ready ticket
+        id: pick
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -77,7 +89,29 @@ jobs:
           fi
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
           echo "BRANCH=agent/issue-$ticket" >> "$GITHUB_ENV"
+          echo "ticket=$ticket" >> "$GITHUB_OUTPUT"
           echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
+
+      # Before the claim and before any tokens are spent: without `## Checks`
+      # on the default branch there is nothing to judge the work by.
+      - name: Pre-flight
+        if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$FACTORY/scripts/implementer/fetch-default-claude-md" "$RUNNER_TEMP/default-claude.md"
+          if "$FACTORY/scripts/implementer/checks-section" "$RUNNER_TEMP/default-claude.md" > /dev/null; then
+            exit 0
+          fi
+          gh issue comment "$TICKET" --body-file - <<EOF
+          The factory can't start on this ticket: \`CLAUDE.md\` on \`$DEFAULT_BRANCH\` has no \`## Checks\` section, so there are no commands to judge the work by. Add one on \`$DEFAULT_BRANCH\`, then re-add \`agent:ready\`.
+
+          Run: $RUN_URL
+          EOF
+          gh issue edit "$TICKET" --remove-label agent:ready --add-label agent:needs-human
+          echo "Pre-flight: no \`## Checks\` in \`CLAUDE.md\` on \`$DEFAULT_BRANCH\`; ticket handed back." >> "$GITHUB_STEP_SUMMARY"
+          # Nothing else runs for this ticket.
+          echo "TICKET=" >> "$GITHUB_ENV"
 
       - name: Claim the ticket
         if: env.TICKET != ''
@@ -166,50 +200,97 @@ jobs:
             --add-dir ${{ runner.temp }}/factory
             --append-system-prompt-file ${{ runner.temp }}/factory/system.md
 
+      # Read before anything else can fail, so report-failure can tell an
+      # expired or revoked Claude token from any other breakage.
+      - name: Check for a rejected Claude token
+        id: auth
+        if: always() && env.TICKET != '' && steps.claude.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+        run: |
+          if "$FACTORY/scripts/implementer/auth-failed" "$EXECUTION_FILE"; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "::error::The Claude token was rejected (authentication_failed)."
+          fi
+
       # Deterministic from here on: the agent never pushes or touches labels.
+      # Sets `kind`: done, needs-human or checks-changed. A missing or
+      # malformed outcome file, or a `done` that breaks the contract, fails
+      # the run instead.
       - name: Check the outcome
+        id: outcome
         if: env.TICKET != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          outcome_file="$RUN_DIR/outcome.json"
-          if [ ! -f "$outcome_file" ]; then
-            echo "::error::The agent wrote no outcome file."
+          if ! kind="$("$FACTORY/scripts/implementer/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/agent-comment.md")"; then
+            echo "::error::The outcome file is missing or malformed."
             exit 1
           fi
-          outcome="$(jq -r '.outcome // empty' "$outcome_file")"
-          echo "Outcome: \`${outcome:-<unreadable>}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$outcome" != "done" ]; then
-            echo "::error::Outcome '${outcome}' is not handled yet; only 'done' is."
-            exit 1
+          echo "Outcome: \`$kind\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$kind" = "done" ]; then
+            # The whole PR, not just this run's commits, must leave the
+            # commands it is judged by as the default branch defines them.
+            # Fetched only now, after the agent step, so the agent never
+            # holds this copy. A retry can't fix a change here, so it goes
+            # to a human rather than failing the run.
+            "$FACTORY/scripts/implementer/fetch-default-claude-md" "$RUNNER_TEMP/default-claude.md"
+            if ! "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" CLAUDE.md \
+                 > "$RUNNER_TEMP/checks-diff.txt"; then
+              kind="checks-changed"
+              echo "Branch changes \`CLAUDE.md\`'s \`## Checks\` section; handed back." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-          "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
-          # The whole PR, not just this run's commits, must leave the commands
-          # it is judged by as the default branch defines them. Fetched only
-          # now, after the agent step, so the agent never holds this copy.
-          gh api -H "Accept: application/vnd.github.raw" \
-            "repos/$GH_REPO/contents/CLAUDE.md?ref=$DEFAULT_BRANCH" > "$RUNNER_TEMP/default-claude.md" \
-            || rm -f "$RUNNER_TEMP/default-claude.md"
-          "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" CLAUDE.md
-          if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
-            echo "::error::The agent left branch $BRANCH."
-            exit 1
+          if [ "$kind" = "done" ]; then
+            "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
+            if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
+              echo "::error::The agent left branch $BRANCH."
+              exit 1
+            fi
+            if [ "$(git rev-list --count "$BASE_SHA..HEAD")" -eq 0 ]; then
+              echo "::error::Outcome is 'done' but the agent made no commits."
+              exit 1
+            fi
+            forbidden="$(git diff --name-only "$BASE_SHA" HEAD | grep -E "^(\.github/workflows/|\.github/actions/factory-setup/|$RUN_DIR/)" || true)"
+            if [ -n "$forbidden" ]; then
+              echo "::error::The agent committed files it must never touch: $forbidden"
+              exit 1
+            fi
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "::warning::Uncommitted changes left by the agent are not pushed."
+            fi
           fi
-          if [ "$(git rev-list --count "$BASE_SHA..HEAD")" -eq 0 ]; then
-            echo "::error::Outcome is 'done' but the agent made no commits."
-            exit 1
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+
+      # Nothing is pushed. The agent's own question is posted as claude[bot],
+      # the factory's notes and the label as GITHUB_TOKEN.
+      - name: Hand the ticket back to a human
+        if: steps.outcome.outputs.kind == 'needs-human' || steps.outcome.outputs.kind == 'checks-changed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIND: ${{ steps.outcome.outputs.kind }}
+        run: |
+          if [ "$KIND" = "needs-human" ]; then
+            token="$("$FACTORY/scripts/implementer/claude-app-token" mint)"
+            echo "::add-mask::$token"
+            trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
+            { cat "$RUNNER_TEMP/agent-comment.md"; printf '\n\n---\n\nRun: %s\n' "$RUN_URL"; } \
+              | GH_TOKEN="$token" gh issue comment "$TICKET" --body-file -
+          else
+            {
+              echo "The work on \`$BRANCH\` changes \`CLAUDE.md\`'s \`## Checks\` section, so it can't be judged by the commands on \`$DEFAULT_BRANCH\`. A retry can't pass until that change lands on \`$DEFAULT_BRANCH\` or is dropped from the branch. Then re-add \`agent:ready\`."
+              echo
+              echo '```diff'
+              cat "$RUNNER_TEMP/checks-diff.txt"
+              echo '```'
+              echo
+              echo "Run: $RUN_URL"
+            } | gh issue comment "$TICKET" --body-file -
           fi
-          forbidden="$(git diff --name-only "$BASE_SHA" HEAD | grep -E "^(\.github/workflows/|\.github/actions/factory-setup/|$RUN_DIR/)" || true)"
-          if [ -n "$forbidden" ]; then
-            echo "::error::The agent committed files it must never touch: $forbidden"
-            exit 1
-          fi
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::warning::Uncommitted changes left by the agent are not pushed."
-          fi
+          gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:needs-human
 
       - name: Push and open the PR as claude[bot]
-        if: env.TICKET != ''
+        if: steps.outcome.outputs.kind == 'done'
         env:
           GITHUB_TOKEN_FOR_READS: ${{ github.token }}
         run: |
@@ -249,7 +330,35 @@ jobs:
           echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Move the ticket to in-review
-        if: env.TICKET != ''
+        if: steps.outcome.outputs.kind == 'done'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:in-review
+
+  # A separate job, because a timed-out or cancelled job skips its own
+  # failure() steps (docs/factory-design.md §13 item 4). Any run that claimed a
+  # ticket and then broke lands here; the steps that push are gated on a clean
+  # `done`, so nothing partial was pushed.
+  report-failure:
+    needs: implement
+    if: (failure() || cancelled()) && needs.implement.outputs.ticket != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TICKET: ${{ needs.implement.outputs.ticket }}
+      AUTH_FAILED: ${{ needs.implement.outputs.auth_failed }}
+    steps:
+      - name: Mark the ticket failed
+        run: |
+          if [ "$AUTH_FAILED" = "true" ]; then
+            reason="The Claude token was rejected (\`authentication_failed\`): it has expired or been revoked. Rotate the Claude token (\`CLAUDE_CODE_OAUTH_TOKEN\`), then re-add \`agent:ready\`."
+          else
+            reason="The implementer run broke before it finished (a failed step, a timeout or a cancel). See the run for what went wrong, then re-add \`agent:ready\` to retry."
+          fi
+          printf '%s\n\nRun: %s\n' "$reason" "$RUN_URL" | gh issue comment "$TICKET" --body-file -
+          gh issue edit "$TICKET" --remove-label agent:ready --remove-label agent:in-progress --add-label agent:failed
