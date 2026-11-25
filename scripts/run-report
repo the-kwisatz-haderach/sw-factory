@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usage: run-report <owner/repo> <run-id>
+# Run locally, under the owner's gh login. Downloads a factory run's artifacts
+# and prints, for each, a digest of the agent's transcript (scripts/
+# transcript-digest) and any outcome file. For checking what an agent actually
+# did, which the Actions log hides. Prints the output only to this terminal:
+# target repos are private, so never paste it into the public factory repo.
+set -euo pipefail
+repo="${1:?usage: run-report <owner/repo> <run-id>}" run="${2:?usage: run-report <owner/repo> <run-id>}"
+here="$(cd "$(dirname "$0")" && pwd)"
+dir="$(mktemp -d)"; trap 'rm -rf "$dir"' EXIT
+if ! gh run download "$run" -R "$repo" -D "$dir" > /dev/null 2>&1; then
+  echo "Run $run has no artifacts to download." >&2
+  exit 1
+fi
+found=0
+for artifact in "$dir"/*/; do
+  name="$(basename "$artifact")"
+  for f in "$artifact"claude-execution-output.json "$artifact"outcome.json; do
+    [ -f "$f" ] || continue
+    found=1
+    echo "== $name/$(basename "$f")"
+    case "$f" in
+      *claude-execution-output.json) "$here/transcript-digest" "$f" ;;
+      *) jq . "$f" ;;
+    esac
+    echo
+  done
+done
+[ "$found" -eq 1 ] || { echo "Run $run has no transcript or outcome file." >&2; exit 1; }

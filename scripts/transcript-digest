@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Usage: transcript-digest <execution-file>
+# Prints a short digest of one agent run from claude-code-action's execution
+# file: the model, the result (turns, duration, cost), tool calls by name, the
+# skills called and any permission denials. For reading a run after the fact;
+# scripts/run-report fetches the file. Exits 1 if the file is unreadable.
+set -euo pipefail
+file="${1:?usage: transcript-digest <execution-file>}"
+here="$(cd "$(dirname "$0")" && pwd)"
+skills="$("$here/transcript-skills" "$file")"
+jq -r --arg skills "$skills" '
+  def counts: group_by(.) | map("\(.[0]) \(length)") | join(", ") | if . == "" then "none" else . end;
+  (map(select(.type? == "result")) | last) as $r
+  | "Model: \(map(select(.type? == "system" and .subtype? == "init")) | first | .model // "unknown")",
+    "Result: " + (if $r == null then "none (the run ended without one)"
+      else "\($r.subtype // "unknown"), \($r.num_turns // "?") turns, \(($r.duration_ms // 0) / 100 | round / 10) s, $\(($r.total_cost_usd // 0) * 100 | round / 100)" end),
+    "Tool calls: \([.[] | objects | select(.type == "assistant") | .message.content[]? | objects | select(.type == "tool_use") | .name] | counts)",
+    "Skills: \(if $skills == "" then "none" else ($skills | split("\n") | join(", ")) end)",
+    "Permission denials: \([$r.permission_denials[]?.tool_name] | counts)"
+' "$file"

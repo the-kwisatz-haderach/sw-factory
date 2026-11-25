@@ -224,13 +224,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FACTORY_SHA: ${{ job.workflow_sha }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
         run: |
           # The agent's part of the job summary (ticket class, which version
           # of each skill ran, unrelated issues noticed), written before the
           # outcome is judged so a rejected outcome still shows what it said.
           # BASE_SHA is what the run started from, so a target-repo override
-          # is the one the agent loaded.
-          "$FACTORY/scripts/implementer/run-summary" "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "$BASE_SHA" \
+          # is the one the agent loaded. The skills come from the transcript's
+          # Skill calls, not the agent's word, whenever the transcript reads.
+          "$FACTORY/scripts/implementer/run-summary" "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "$BASE_SHA" "$EXECUTION_FILE" \
             >> "$GITHUB_STEP_SUMMARY" || echo "::warning::Could not summarise the outcome file."
           if ! outcome="$("$FACTORY/scripts/implementer/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/agent-comment.md")"; then
             echo "::error::The outcome file is missing or malformed."

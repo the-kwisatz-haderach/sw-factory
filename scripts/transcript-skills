@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Usage: transcript-skills <execution-file>
+# Prints every skill the run called through the Skill tool, once each, in the
+# order of first call, as the Skill tool named it (`factory:tdd`, or `tdd`
+# for a target repo's own). Reads claude-code-action's execution file: a JSON
+# array of SDK messages (docs/factory-design.md §13 item 7). Subagents' calls
+# count too. Exits 1 if the file is missing or not such an array.
+set -euo pipefail
+file="${1:?usage: transcript-skills <execution-file>}"
+[ -f "$file" ] || { echo "No transcript: $file" >&2; exit 1; }
+jq -e 'type == "array"' "$file" > /dev/null 2>&1 \
+  || { echo "Not an execution file (a JSON array of SDK messages): $file" >&2; exit 1; }
+jq -r '
+  [ .[] | objects | select(.type == "assistant")
+    | .message.content[]? | objects
+    | select(.type == "tool_use" and .name == "Skill")
+    | .input.skill | strings ]
+  | reduce .[] as $s ([]; if index([$s]) then . else . + [$s] end)
+  | .[]
+' "$file"
