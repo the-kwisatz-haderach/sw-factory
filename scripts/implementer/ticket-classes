@@ -1,0 +1,8 @@
+# The ticket classes an implementer `done` may record, one per line: the class,
+# a tab, and its label for the job summary.
+# Read by read-outcome and run-summary. The skill chains and Evidence per class
+# live in skills/implementer/SKILL.md, which must list the same classes.
+bug-fix	bug fix
+behaviour-change	behaviour change
+refactor	refactor
+docs-config	docs or config

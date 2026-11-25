@@ -4,7 +4,7 @@
 # `needs-human` it writes the agent's question or give-up reason to
 # <comment-out>. Exits 1, so the run counts as failed, when the file is
 # missing or unreadable, the outcome is unknown, a `done` records no ticket
-# class (bug-fix, behaviour-change, refactor or docs-config), or a
+# class from ./ticket-classes, or a
 # `needs-human` has no comment.
 set -euo pipefail
 file="${1:-}" comment_out="${2:?usage: read-outcome <outcome.json> <comment-out>}"
@@ -14,10 +14,10 @@ outcome="$(jq -r '.outcome // empty' "$file" 2>/dev/null)" \
 case "$outcome" in
   done)
     class="$(jq -r '.class // empty' "$file")"
-    case "$class" in
-      bug-fix|behaviour-change|refactor|docs-config) ;;
-      *) echo "Outcome 'done' records no ticket class (got '${class:-<none>}')." >&2; exit 1 ;;
-    esac
+    if ! grep -v '^#' "$(dirname "$0")/ticket-classes" | cut -f1 | grep -qxF -- "${class:-<none>}"; then
+      echo "Outcome 'done' records no ticket class (got '${class:-<none>}')." >&2
+      exit 1
+    fi
     ;;
   needs-human)
     jq -r '.comment // empty' "$file" > "$comment_out"
