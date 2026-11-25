@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Usage: gh api 'repos/{owner}/{repo}/issues?labels=agent:ready&state=open' --paginate --slurp | jq add | pick-ticket
+# Reads a REST issues list on stdin and prints the number of the oldest ticket
+# (by creation time), skipping pull requests. Prints nothing if there is none.
+set -euo pipefail
+jq -r '[.[] | select(has("pull_request") | not)] | sort_by(.created_at) | first | .number // empty'

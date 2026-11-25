@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Usage: check-pr-body <pr-body.md> <ticket-number>
+# Checks the implementer's PR body against the task contract: it must say
+# `Closes #<n>` and carry the headings Summary, Evidence and Merge Danger.
+# Exits 1 and names every missing item if any is absent.
+set -euo pipefail
+body="$1" n="$2"
+missing=()
+[ -f "$body" ] || { echo "PR body not found: $body" >&2; exit 1; }
+grep -Eq "(^|[^[:alnum:]_])Closes #${n}([^0-9]|$)" "$body" || missing+=("Closes #${n}")
+for heading in "Summary" "Evidence" "Merge Danger"; do
+  grep -Eq "^## ${heading}[[:space:]]*$" "$body" || missing+=("## ${heading}")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  printf 'PR body is missing: %s\n' "${missing[@]}" >&2
+  exit 1
+fi

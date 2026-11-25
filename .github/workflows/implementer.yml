@@ -1,0 +1,178 @@
+# The implementer task (docs/factory-design.md §7), called by a target repo's
+# stub. Everything here runs in the target repo: its minutes, logs and secrets.
+#
+# Happy path only so far: an allowlisted actor adds `agent:ready`, the run
+# claims the oldest ready ticket, the agent builds it with the factory plugin,
+# and on outcome `done` the branch is pushed and the PR opened as `claude[bot]`.
+name: implementer
+
+on:
+  workflow_call:
+    inputs:
+      allowlist:
+        description: >-
+          Comma-separated logins, no spaces, that may start a run. Checked
+          against who performed the triggering action (who added the label),
+          not who opened the ticket.
+        type: string
+        default: "the-kwisatz-haderach,claude[bot]"
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  implement:
+    if: >-
+      github.event_name == 'issues'
+      && github.event.action == 'labeled'
+      && github.event.label.name == 'agent:ready'
+      && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    env:
+      # Deliberately no job-level GH_TOKEN: the agent step must not inherit a
+      # token it could use to touch labels. Each bookkeeping step sets its own.
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      RUN_DIR: .factory-run
+    steps:
+      # The plugin comes from the exact commit of this running workflow, so the
+      # instructions and the workflow can never skew. It is moved out of the
+      # workspace so the target checkout can't see, load or commit it.
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
+      - name: Move the factory plugin out of the workspace
+        run: |
+          mv .factory-plugin "$RUNNER_TEMP/factory"
+          echo "FACTORY=$RUNNER_TEMP/factory" >> "$GITHUB_ENV"
+
+      - name: Pick the oldest ready ticket
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ticket="$(gh api --paginate --slurp "repos/$GH_REPO/issues?labels=agent%3Aready&state=open&per_page=100" \
+            | jq 'add // []' | "$FACTORY/scripts/implementer/pick-ticket")"
+          if [ -z "$ticket" ]; then
+            echo "No \`agent:ready\` ticket; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "TICKET=$ticket" >> "$GITHUB_ENV"
+          echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Claim the ticket
+        if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue edit "$TICKET" --remove-label agent:ready --add-label agent:in-progress
+
+      - name: Check out the target repo
+        if: env.TICKET != ''
+        uses: actions/checkout@v6
+
+      - name: Run the target repo's factory-setup
+        if: env.TICKET != '' && hashFiles('.github/actions/factory-setup/action.yml', '.github/actions/factory-setup/action.yaml') != ''
+        uses: ./.github/actions/factory-setup
+
+      - name: Prepare the branch and run directory
+        if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git checkout -b "agent/issue-$TICKET"
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # The run directory is git-ignored for this checkout only, so the
+          # agent's outcome file and PR body can never be committed.
+          mkdir -p "$RUN_DIR"
+          echo "/$RUN_DIR/" >> .git/info/exclude
+          gh issue view "$TICKET" --json number,title,body,comments --jq '
+            "# #\(.number): \(.title)\n\n\(.body // "")\n"
+            + ([.comments[] | "\n---\n\n**\(.author.login)** commented on \(.createdAt):\n\n\(.body)\n"] | join(""))
+          ' > "$RUN_DIR/ticket.md"
+
+      - name: Implement
+        id: claude
+        if: env.TICKET != ''
+        timeout-minutes: 40
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            /factory:implementer
+            Ticket: #${{ env.TICKET }}
+            Run directory: ${{ env.RUN_DIR }}/
+          claude_args: >-
+            --plugin-dir ${{ runner.temp }}/factory
+            --add-dir ${{ runner.temp }}/factory
+            --append-system-prompt-file ${{ runner.temp }}/factory/system.md
+
+      # Deterministic from here on: the agent never pushes or touches labels.
+      - name: Check the outcome
+        if: env.TICKET != ''
+        run: |
+          outcome_file="$RUN_DIR/outcome.json"
+          if [ ! -f "$outcome_file" ]; then
+            echo "::error::The agent wrote no outcome file."
+            exit 1
+          fi
+          outcome="$(jq -r '.outcome // empty' "$outcome_file")"
+          echo "Outcome: \`${outcome:-<unreadable>}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$outcome" != "done" ]; then
+            echo "::error::Outcome '${outcome}' is not handled yet; only 'done' is."
+            exit 1
+          fi
+          "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "agent/issue-$TICKET" ]; then
+            echo "::error::The agent left branch agent/issue-$TICKET."
+            exit 1
+          fi
+          if [ "$(git rev-list --count "$BASE_SHA..HEAD")" -eq 0 ]; then
+            echo "::error::Outcome is 'done' but the agent made no commits."
+            exit 1
+          fi
+          forbidden="$(git diff --name-only "$BASE_SHA" HEAD | grep -E "^(\.github/workflows/|$RUN_DIR/)" || true)"
+          if [ -n "$forbidden" ]; then
+            echo "::error::The agent committed files it must never touch: $forbidden"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::Uncommitted changes left by the agent are not pushed."
+          fi
+
+      - name: Push and open the PR as claude[bot]
+        if: env.TICKET != ''
+        env:
+          GITHUB_TOKEN_FOR_READS: ${{ github.token }}
+        run: |
+          token="$("$FACTORY/scripts/implementer/claude-app-token" mint)"
+          echo "::add-mask::$token"
+          trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
+
+          branch="agent/issue-$TICKET"
+          git -c "http.${GITHUB_SERVER_URL}/.extraheader=" push \
+            "https://x-access-token:${token}@${GITHUB_SERVER_URL#https://}/${GH_REPO}.git" \
+            "HEAD:refs/heads/$branch"
+
+          title="$(GH_TOKEN="$GITHUB_TOKEN_FOR_READS" gh issue view "$TICKET" --json title --jq .title)"
+          { cat "$RUN_DIR/pr-body.md"; printf '\n\n---\n\nRun: %s\n' "$RUN_URL"; } > "$RUNNER_TEMP/pr-body.md"
+          pr_url="$(GH_TOKEN="$token" gh pr create \
+            --base "$DEFAULT_BRANCH" --head "$branch" \
+            --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
+          echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Move the ticket to in-review
+        if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:in-review

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Usage: claude-app-token mint          prints a Claude GitHub App token
+#        claude-app-token revoke <tok>  revokes it
+#
+# The deterministic steps after the agent step write as `claude[bot]`, so its
+# pushes and PRs start CI and review. claude-code-action revokes its own token
+# when its step ends, so these steps mint their own the same way the action
+# does: the job's OIDC token (needs `id-token: write`) exchanged at Anthropic's
+# token-exchange endpoint for an installation token of the official Claude App,
+# scoped to this repo. The caller masks it (`::add-mask::`) and always revokes
+# it when done.
+set -euo pipefail
+
+case "${1:-}" in
+  mint)
+    : "${ACTIONS_ID_TOKEN_REQUEST_URL:?id-token: write permission is required}"
+    oidc="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+      "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=claude-code-github-action" | jq -r .value)"
+    resp="$(curl -sS -X POST -H "Authorization: Bearer ${oidc}" \
+      -w '\n%{http_code}' https://api.anthropic.com/api/github/github-app-token-exchange)"
+    code="${resp##*$'\n'}" body="${resp%$'\n'*}"
+    if [ "$code" != "200" ]; then
+      echo "Claude App token exchange failed (HTTP $code): $(jq -r '.error.message // .message // "unknown error"' <<<"$body" 2>/dev/null)" >&2
+      exit 1
+    fi
+    token="$(jq -r '.token // .app_token // empty' <<<"$body")"
+    [ -n "$token" ] || { echo "Claude App token missing from exchange response" >&2; exit 1; }
+    echo "$token"
+    ;;
+  revoke)
+    curl -q -sS --max-time 10 -X DELETE \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer ${2:?token required}" \
+      "${GITHUB_API_URL:-https://api.github.com}/installation/token" || true
+    ;;
+  *)
+    echo "usage: claude-app-token mint | revoke <token>" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,21 @@
+# The factory stub. Copy it to a target repo as .github/workflows/factory.yml.
+# It only forwards: routing, the allowlist, timeouts and caps all live in the
+# factory's reusable workflows, so changing them never means touching this file.
+name: factory
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  implementer:
+    uses: the-kwisatz-haderach/sw-factory/.github/workflows/implementer.yml@main
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: write
+      actions: write
+      id-token: write
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
