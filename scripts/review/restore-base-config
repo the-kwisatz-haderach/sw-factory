@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Usage: restore-base-config <base-ref>     (run inside the PR's checkout)
 # Puts the paths that steer the review back to how <base-ref> has them, so a PR
-# can't rewrite the standards it is reviewed against: `.claude/` (skills,
-# hooks, settings), `CLAUDE.md` and the documented coding standards. A path the
+# can't rewrite the standards it is reviewed against, or the tools the
+# reviewer loads: `.claude/` (skills, hooks, settings), `.mcp.json`,
+# `CLAUDE.md` and the documented coding standards. A path the
 # base lacks is removed. Only the working tree and index change: HEAD stays on
 # the PR, so `git diff <base>...HEAD` still shows every change the PR makes.
 set -euo pipefail
 base="${1:?usage: restore-base-config <base-ref>}"
 git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "Unknown base ref: $base" >&2; exit 1; }
-for path in .claude CLAUDE.md CODING_STANDARDS.md CONTRIBUTING.md; do
+for path in .claude .mcp.json CLAUDE.md CODING_STANDARDS.md CONTRIBUTING.md; do
   git rm -r -q --cached --ignore-unmatch -- "$path"
   rm -rf -- "$path"
   if git cat-file -e "$base:$path" 2>/dev/null; then

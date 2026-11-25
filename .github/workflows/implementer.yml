@@ -152,6 +152,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Steps run without pipefail; a failed `gh` below must fail the step.
+          set -o pipefail
           # When continuing a PR the checkout is already on its branch, and
           # BASE_SHA is the PR's head, so the checks below see only new commits.
           if [ -z "$PR_NUMBER" ]; then

@@ -237,7 +237,7 @@ Decided in [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17).
 
 - The generic layer never carries project knowledge.
 - The target repo's `CLAUDE.md`, `.claude/skills`, `.claude/settings.json` (hooks) and `.mcp.json` load as usual.
-- On PR events the review workflow restores `.claude/`, `CLAUDE.md` and the standards files (`CODING_STANDARDS.md`, `CONTRIBUTING.md`) from the base branch, so a PR can't rewrite the standards it is reviewed against. The action has a restore of its own, but its docs leave unclear whether it covers a bot's PR run with a `prompt`, so the factory doesn't rely on it ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)).
+- On PR events the review workflow restores `.claude/`, `.mcp.json`, `CLAUDE.md` and the standards files (`CODING_STANDARDS.md`, `CONTRIBUTING.md`) from the base branch, so a PR can't rewrite the standards it is reviewed against. The action has a restore of its own, but its docs leave unclear whether it covers a bot's PR run with a `prompt`, so the factory doesn't rely on it ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)).
 
 ### Factory skills (v1)
 
@@ -595,6 +595,8 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 11 | Adding a repo to the Claude App installation can't be scripted with the owner's token (assumed, hence the printed link) | if it can, script it | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 12 | Whether a single `setup-token` token can be revoked on its own | — | [#3](https://github.com/the-kwisatz-haderach/sw-factory/issues/3) |
 | 13 | **Where unmerged-PR-close handling runs.** [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) gives it to the board sweep; [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) subscribes the stub to `pull_request: closed`. The stub path writes the label with `GITHUB_TOKEN` at once and starts no run; a label written by the sweep's PAT would show up as the owner's and start a no-op implementer run. Recommended: the stub path. | the sweep, as in [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) | reconciliation of [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) and [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
+| 14 | The review agent step runs on the job's read-only `GITHUB_TOKEN` (`github_token` input, no `id-token`) for a `claude[bot]`-triggered PR run, with `allowed_bots: "claude[bot]"` | give the review job `id-token: write` and rely on `--disallowedTools` alone to keep the agent from pushing | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
+| 15 | A review job skipped by its `if` (another actor's push, a non-agent branch) doesn't take the `review-<pr>` group and cancel a running review. Also accepted: a re-run for an older SHA cancels the head's review, which then waits for the backstop ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)) | move the gate into the stub's job `if` | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
 
 **Calibrate after the first week of traced runs:**
 

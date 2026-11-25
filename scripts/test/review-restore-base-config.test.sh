@@ -10,6 +10,7 @@ mkdir -p "$tmp/repo/.claude" && g init -q -b main
 echo "base rules" > "$tmp/repo/CLAUDE.md"
 echo "base standards" > "$tmp/repo/CODING_STANDARDS.md"
 echo '{"hooks": "base"}' > "$tmp/repo/.claude/settings.json"
+echo '{"mcpServers": {}}' > "$tmp/repo/.mcp.json"
 echo "base code" > "$tmp/repo/app.sh"
 g add -A && g commit -qm base
 base="$(g rev-parse HEAD)"
@@ -20,6 +21,7 @@ rm "$tmp/repo/CODING_STANDARDS.md"
 echo "PR contributing" > "$tmp/repo/CONTRIBUTING.md"
 echo '{"hooks": "pr"}' > "$tmp/repo/.claude/settings.json"
 mkdir -p "$tmp/repo/.claude/skills/review" && echo "PR review skill" > "$tmp/repo/.claude/skills/review/SKILL.md"
+echo '{"mcpServers": {"pr": {"command": "./run-me"}}}' > "$tmp/repo/.mcp.json"
 echo "PR code" > "$tmp/repo/app.sh"
 g add -A && g commit -qm pr
 head="$(g rev-parse HEAD)"
@@ -28,6 +30,7 @@ expect_status "restores from the base" 0 sh -c "cd '$tmp/repo' && '$restore' '$b
 expect_output "CLAUDE.md is the base's" "base rules" cat "$tmp/repo/CLAUDE.md"
 expect_output ".claude/ files are the base's" '{"hooks": "base"}' cat "$tmp/repo/.claude/settings.json"
 expect_status "a .claude/ file the PR added is gone" 1 test -e "$tmp/repo/.claude/skills/review/SKILL.md"
+expect_output ".mcp.json is the base's" '{"mcpServers": {}}' cat "$tmp/repo/.mcp.json"
 expect_output "a standards file the PR deleted is back" "base standards" cat "$tmp/repo/CODING_STANDARDS.md"
 expect_status "a standards file the base lacks is gone" 1 test -e "$tmp/repo/CONTRIBUTING.md"
 expect_output "the PR's code is untouched" "PR code" cat "$tmp/repo/app.sh"

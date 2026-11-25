@@ -40,6 +40,9 @@ want="$(printf '%s\n' \
   $'src/a.sh\t41' $'src/a.sh\t42' \
   $'docs/new.md\t1' $'docs/new.md\t2')"
 expect_output "lists added and context lines on the new side, per file" "$want" sh -c "'$diff_lines' < '$tmp/change.diff'"
+# git ends a `+++` header with a tab when the path holds a space.
+printf 'diff --git a/my notes.md b/my notes.md\n--- a/my notes.md\n+++ b/my notes.md\t\n@@ -1 +1 @@\n-a\n+b\n' > "$tmp/space.diff"
+expect_output "a path with a space is read whole" $'my notes.md\t1' sh -c "'$diff_lines' < '$tmp/space.diff'"
 expect_output "an empty diff lists nothing" "" sh -c "'$diff_lines' < /dev/null"
 
 finish

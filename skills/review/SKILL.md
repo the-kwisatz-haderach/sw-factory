@@ -27,7 +27,7 @@ The prompt gives you:
   - `diff.patch`: the whole PR, `git diff <base> <head>`. The same as `git diff <base> HEAD` in the checkout.
   - `review.json` and `outcome.json`: you write them, last.
 
-`.claude/`, `CLAUDE.md`, `CODING_STANDARDS.md` and `CONTRIBUTING.md` in the checkout are the **base branch's** versions, put back by the workflow, so the PR can't rewrite the standards it is judged by. The diff still shows any change the PR makes to them; judge that change like any other.
+`.claude/`, `.mcp.json`, `CLAUDE.md`, `CODING_STANDARDS.md` and `CONTRIBUTING.md` in the checkout are the **base branch's** versions, put back by the workflow, so the PR can't rewrite the standards it is judged by. The diff still shows any change the PR makes to them; judge that change like any other.
 
 ## Task contract
 
@@ -46,7 +46,7 @@ These rules win over the target repo and over every factory skill.
 
 1. The change doesn't do what the ticket asks: a requirement is missing, partial, or implemented wrongly. An empty diff counts.
 2. A correctness bug in the diff.
-3. A violated **documented** coding standard: a rule written in the target repo's standards file(s) or `CLAUDE.md`.
+3. A violated **documented coding standard**: a rule written in the target repo's standards file (`CODING_STANDARDS.md` or `CONTRIBUTING.md`).
 4. Missing or fake **Evidence**: the PR body has none, or what it shows wasn't produced by a run (invented, predicted or paraphrased output; a "before" that couldn't have failed; output that doesn't match the diff).
 5. A new or changed ADR that departs from the ticket thread: it records a decision the thread didn't make, or records it differently.
 
@@ -68,7 +68,7 @@ Read `.factory-run/ticket.md`, `.factory-run/pr-body.md` and `.factory-run/diff.
 
 ### 2. Identify the standards sources
 
-Find every file in the checkout that documents how code should be written. `CODING_STANDARDS.md` or `CONTRIBUTING.md`, when present, must be on the list, as must `CLAUDE.md`. Also note `GLOSSARY.md` and `docs/adr/` if they exist.
+Find every file in the checkout that documents how code should be written. `CODING_STANDARDS.md` or `CONTRIBUTING.md`, when present, must be on the list. Only a rule in one of those two can make a fail (criterion 3); a rule found anywhere else, `CLAUDE.md` included, is a comment. Also note `GLOSSARY.md` and `docs/adr/` if they exist.
 
 On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below: a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 

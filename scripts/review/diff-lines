@@ -19,7 +19,10 @@ awk '
     line++
     next
   }
-  /^\+\+\+ / { path = ($0 ~ /^\+\+\+ b\//) ? substr($0, 7) : ""; next }
+  # git ends the header with a tab when the path holds a space. A quoted path
+  # (non-ASCII or control characters) lists nothing, so its comments move
+  # into the review body.
+  /^\+\+\+ / { path = ($0 ~ /^\+\+\+ b\//) ? substr($0, 7) : ""; sub(/\t$/, "", path); next }
   /^@@ / {
     split($3, n, ",")
     old_left = hunk_len(substr($2, 2)); new_left = hunk_len(substr($3, 2))
