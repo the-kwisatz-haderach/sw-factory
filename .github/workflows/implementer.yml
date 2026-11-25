@@ -6,6 +6,7 @@
 # and on outcome `done` the branch is pushed and the PR opened as `claude[bot]`.
 # If the ticket's branch already has an open PR, the run continues that PR
 # instead: new commits on its branch, no force-push, the body rewritten.
+# Without one, a leftover branch of the same name is deleted before the push.
 name: implementer
 
 on:
@@ -207,10 +208,22 @@ jobs:
           echo "::add-mask::$token"
           trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
 
+          remote="https://x-access-token:${token}@${GITHUB_SERVER_URL#https://}/${GH_REPO}.git"
+          git() { command git -c "http.${GITHUB_SERVER_URL}/.extraheader=" "$@"; }
+
+          # Without an open PR, a leftover branch (its PR closed or merged) is
+          # deleted, so the fresh branch from the default branch can be pushed
+          # without a force-push.
+          if [ -z "$PR_NUMBER" ]; then
+            leftover="$(git ls-remote --heads "$remote" "refs/heads/$BRANCH" | cut -f1)"
+            if [ -n "$leftover" ]; then
+              git push "$remote" --delete "refs/heads/$BRANCH"
+              echo "Deleted leftover branch \`$BRANCH\` at \`$leftover\`, which had no open PR." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
           # A plain push, never a force-push: continuing a PR only adds commits.
-          git -c "http.${GITHUB_SERVER_URL}/.extraheader=" push \
-            "https://x-access-token:${token}@${GITHUB_SERVER_URL#https://}/${GH_REPO}.git" \
-            "HEAD:refs/heads/$BRANCH"
+          git push "$remote" "HEAD:refs/heads/$BRANCH"
 
           title="$(GH_TOKEN="$GITHUB_TOKEN_FOR_READS" gh issue view "$TICKET" --json title --jq .title)"
           { cat "$RUN_DIR/pr-body.md"; printf '\n\n---\n\nRun: %s\n' "$RUN_URL"; } > "$RUNNER_TEMP/pr-body.md"

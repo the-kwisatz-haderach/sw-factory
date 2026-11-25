@@ -313,7 +313,7 @@ In order:
    - check out the target repo
    - run `.github/actions/factory-setup` if it exists
    - check out the factory plugin at `job.workflow_sha`
-6. **Branch:** use the fixed branch `agent/issue-<n>`. If it has an open PR, **continue it**: new commits, no force-push, reading the ticket thread plus the PR's review comments. Otherwise branch from the default branch.
+6. **Branch:** use the fixed branch `agent/issue-<n>`. If it has an open PR, **continue it**: new commits, no force-push, reading the ticket thread plus the PR's review comments. Otherwise branch from the default branch; on `done`, a leftover `agent/issue-<n>` with no open PR (its PR closed or merged) is deleted before the push.
 7. **Agent step** (`claude-code-action`, prompt `/factory:implementer` plus context). The task skill:
    - classifies the ticket and records the class in the job summary:
      - bug fix → `diagnosing-bugs` → `tdd`
@@ -382,7 +382,7 @@ In order:
 
 - A separate follow-up job (`needs: implement`, `if: failure() || cancelled()`, 5 min timeout) sets `agent:failed` and comments the run link. It must be a separate job, because a timed-out or cancelled job skips `failure()` steps.
 - An **expired or revoked token** (`authentication_failed`) gets the distinct comment "rotate the Claude token".
-- **No partial work is pushed.** A retry starts from the existing PR branch if there is one, otherwise from the default branch.
+- **No partial work is pushed.** A retry starts from the existing PR branch if there is one, otherwise from the default branch, replacing any leftover branch only once it has work to push.
 - A **usage limit** is not a failure: the ticket is re-queued ([§10](#10-brakes)).
 
 ## 8. Task: automated review
