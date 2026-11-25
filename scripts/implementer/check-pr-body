@@ -4,10 +4,10 @@
 # `Closes #<n>` and carry the headings Summary, Evidence and Merge Danger.
 # Exits 1 and names every missing item if any is absent.
 set -euo pipefail
-body="$1" n="$2"
+body="$1" ticket="$2"
 missing=()
 [ -f "$body" ] || { echo "PR body not found: $body" >&2; exit 1; }
-grep -Eq "(^|[^[:alnum:]_])Closes #${n}([^0-9]|$)" "$body" || missing+=("Closes #${n}")
+grep -Eq "(^|[^[:alnum:]_])Closes #${ticket}([^0-9]|$)" "$body" || missing+=("Closes #${ticket}")
 for heading in "Summary" "Evidence" "Merge Danger"; do
   grep -Eq "^## ${heading}[[:space:]]*$" "$body" || missing+=("## ${heading}")
 done

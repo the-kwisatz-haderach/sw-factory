@@ -13,7 +13,9 @@ on:
         description: >-
           Comma-separated logins, no spaces, that may start a run. Checked
           against who performed the triggering action (who added the label),
-          not who opened the ticket.
+          not who opened the ticket. Bots on it start only the triggers a task
+          names for them, and the implementer names none: adding agent:ready is
+          a human trigger.
         type: string
         default: "the-kwisatz-haderach,claude[bot]"
     secrets:
@@ -27,6 +29,7 @@ jobs:
       && github.event.action == 'labeled'
       && github.event.label.name == 'agent:ready'
       && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
+      && !endsWith(github.triggering_actor, '[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -69,6 +72,7 @@ jobs:
             exit 0
           fi
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
+          echo "BRANCH=agent/issue-$ticket" >> "$GITHUB_ENV"
           echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Claim the ticket
@@ -77,9 +81,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:ready --add-label agent:in-progress
 
+      # No persisted credentials: the agent step must hold no GITHUB_TOKEN, and
+      # the push step brings its own.
       - name: Check out the target repo
         if: env.TICKET != ''
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Run the target repo's factory-setup
         if: env.TICKET != '' && hashFiles('.github/actions/factory-setup/action.yml', '.github/actions/factory-setup/action.yaml') != ''
@@ -90,7 +98,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git checkout -b "agent/issue-$TICKET"
+          git checkout -b "$BRANCH"
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           # The run directory is git-ignored for this checkout only, so the
           # agent's outcome file and PR body can never be committed.
@@ -133,8 +141,8 @@ jobs:
             exit 1
           fi
           "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
-          if [ "$(git rev-parse --abbrev-ref HEAD)" != "agent/issue-$TICKET" ]; then
-            echo "::error::The agent left branch agent/issue-$TICKET."
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
+            echo "::error::The agent left branch $BRANCH."
             exit 1
           fi
           if [ "$(git rev-list --count "$BASE_SHA..HEAD")" -eq 0 ]; then
@@ -159,15 +167,14 @@ jobs:
           echo "::add-mask::$token"
           trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
 
-          branch="agent/issue-$TICKET"
           git -c "http.${GITHUB_SERVER_URL}/.extraheader=" push \
             "https://x-access-token:${token}@${GITHUB_SERVER_URL#https://}/${GH_REPO}.git" \
-            "HEAD:refs/heads/$branch"
+            "HEAD:refs/heads/$BRANCH"
 
           title="$(GH_TOKEN="$GITHUB_TOKEN_FOR_READS" gh issue view "$TICKET" --json title --jq .title)"
           { cat "$RUN_DIR/pr-body.md"; printf '\n\n---\n\nRun: %s\n' "$RUN_URL"; } > "$RUNNER_TEMP/pr-body.md"
           pr_url="$(GH_TOKEN="$token" gh pr create \
-            --base "$DEFAULT_BRANCH" --head "$branch" \
+            --base "$DEFAULT_BRANCH" --head "$BRANCH" \
             --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
           echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
