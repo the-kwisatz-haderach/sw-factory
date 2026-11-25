@@ -171,7 +171,10 @@ jobs:
           # skills and sub-agents, and Write for the two files in the run
           # directory. Nothing written can leave the read-only job except
           # through the verdict artifact.
+          # Opus: on the action's default model the review skipped its
+          # parallel sub-agents and reviewed alone.
           claude_args: >-
+            --model claude-opus-5-5
             --plugin-dir ${{ runner.temp }}/factory
             --add-dir ${{ runner.temp }}/factory
             --append-system-prompt-file ${{ runner.temp }}/factory/system.md
