@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Usage: read-outcome <outcome.json> <description-out>
+# Reads the review agent's outcome file and prints its review verdict, `pass`
+# or `fail`. Writes the `factory/review` status description to
+# <description-out>: "Passed" or "Failed", plus the agent's one-line reason,
+# cut to GitHub's 140-character limit. Exits 1, so the run counts as broken,
+# when the file is missing or unreadable, the outcome is unknown, or a `fail`
+# gives no reason.
+set -euo pipefail
+file="${1:-}" desc_out="${2:?usage: read-outcome <outcome.json> <description-out>}"
+[ -f "$file" ] || { echo "The agent wrote no outcome file." >&2; exit 1; }
+outcome="$(jq -r '.outcome // empty' "$file" 2>/dev/null)" \
+  || { echo "The outcome file is not valid JSON." >&2; exit 1; }
+reason="$(jq -r '.reason // empty' "$file" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+case "$outcome" in
+  pass) desc="Passed${reason:+: $reason}" ;;
+  fail)
+    [ -n "$reason" ] || { echo "Outcome 'fail' carries no reason." >&2; exit 1; }
+    desc="Failed: $reason"
+    ;;
+  *) echo "Unknown outcome '${outcome:-<none>}'." >&2; exit 1 ;;
+esac
+# jq counts characters, not bytes, as GitHub does.
+jq -Rj 'if length > 140 then .[0:139] + "…" else . end' <<<"$desc" > "$desc_out"
+echo "$outcome"

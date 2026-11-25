@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Usage: git diff <base>...<head> | diff-lines
+# Prints `<path>\t<line>` for every line of a unified diff (with git's a/ b/
+# prefixes) that a PR review comment can sit on: the new side's added and
+# context lines, numbered in the new file. Deleted files list nothing.
+#
+# Hunk lengths are tracked, so a content line that happens to start with
+# `+++` or `---` is never read as a file header.
+set -euo pipefail
+awk '
+  function hunk_len(spec,   parts) { return split(spec, parts, ",") > 1 ? parts[2] + 0 : 1 }
+  old_left > 0 || new_left > 0 {
+    c = substr($0, 1, 1)
+    if (c == "\\") next
+    if (c == "-") { old_left--; next }
+    if (c == "+") { new_left--; if (path != "") print path "\t" line; line++; next }
+    old_left--; new_left--
+    if (path != "") print path "\t" line
+    line++
+    next
+  }
+  /^\+\+\+ / { path = ($0 ~ /^\+\+\+ b\//) ? substr($0, 7) : ""; next }
+  /^@@ / {
+    split($3, n, ",")
+    old_left = hunk_len(substr($2, 2)); new_left = hunk_len(substr($3, 2))
+    line = substr(n[1], 2) + 0
+    next
+  }
+'

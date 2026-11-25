@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Usage: gh api repos/<owner>/<repo>/commits/<sha>/status | ruled
+# Reads a commit's combined status (the latest status per context) and exits 0,
+# printing the verdict, if `factory/review` has already ruled on the commit:
+# `success` or `failure`. Exits 1 otherwise: no status, `pending` or `error`
+# (a broken run, which the backstop re-reviews) are not verdicts.
+set -euo pipefail
+verdict="$(jq -r '[.statuses[] | select(.context == "factory/review") | .state] | first // empty')"
+case "$verdict" in
+  success|failure) echo "$verdict" ;;
+  *) exit 1 ;;
+esac

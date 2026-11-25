@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Usage: gh issue view <n> --json number,title,body,comments | ticket-thread
+# Renders a ticket's title, body and full comment thread as Markdown, oldest
+# comment first: the only copy of the ticket either task's agent reads.
+set -euo pipefail
+jq -r '
+  "# #\(.number): \(.title)\n\n\(.body // "")\n"
+  + ([.comments[] | "\n---\n\n**\(.author.login)** commented on \(.createdAt):\n\n\(.body)\n"] | join(""))
+'

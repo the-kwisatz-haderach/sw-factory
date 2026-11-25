@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Usage: review-payload <review.json> <diff-lines.tsv> <head-sha> <verdict> <run-url>
+# Turns the review agent's review file into the payload for
+# POST repos/<r>/pulls/<n>/reviews: one COMMENT review on <head-sha>.
+#
+# <review.json> is {"body": "...", "comments": [{"path", "line", "body"}]}.
+# <diff-lines.tsv> is diff-lines' output. An inline comment on one of those
+# lines stays inline, on the new side. Any other comment would make GitHub
+# reject the whole review, so it moves into the body instead. The body opens
+# with the review verdict and ends with the run link.
+#
+# Exits 1, so the run counts as broken, when the file is missing or unreadable,
+# the body is empty, or an inline comment has no body.
+set -euo pipefail
+review="$1" lines="$2" sha="$3" verdict="$4" run_url="$5"
+[ -f "$review" ] || { echo "The agent wrote no review file." >&2; exit 1; }
+jq -e 'type == "object"' "$review" >/dev/null 2>&1 || { echo "The review file is not a JSON object." >&2; exit 1; }
+jq -e '(.body | type == "string") and (.body | test("\\S"))' "$review" >/dev/null \
+  || { echo "The review has no body." >&2; exit 1; }
+jq -e '(.comments // []) | all(type == "object" and (.body | type == "string") and (.body | test("\\S")))' "$review" >/dev/null \
+  || { echo "An inline comment has no body." >&2; exit 1; }
+
+jq --rawfile lines "$lines" --arg sha "$sha" --arg verdict "$verdict" --arg run "$run_url" '
+  ($lines | split("\n") | map(select(. != "")) | map({(.): true}) | add // {}) as $on_diff
+  | def on_diff: (.line | type == "number") and $on_diff["\(.path)\t\(.line)"];
+  [ (.comments // [])[] | select(on_diff) ] as $inline
+  | [ (.comments // [])[] | select(on_diff | not) ] as $moved
+  | {
+      commit_id: $sha,
+      event: "COMMENT",
+      body: (
+        "**Review verdict: \($verdict)**\n\n\(.body)"
+        + (if ($moved | length) > 0 then
+             "\n\n### Comments outside the diff\n\n"
+             + ($moved | map("- `\(.path // "?")` line \(.line // "?"): \(.body)") | join("\n"))
+           else "" end)
+        + "\n\n---\n\nRun: \($run)"
+      ),
+      comments: [ $inline[] | {path, line, side: "RIGHT", body} ]
+    }
+' "$review"

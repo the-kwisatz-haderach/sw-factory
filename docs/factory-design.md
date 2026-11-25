@@ -237,7 +237,7 @@ Decided in [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17).
 
 - The generic layer never carries project knowledge.
 - The target repo's `CLAUDE.md`, `.claude/skills`, `.claude/settings.json` (hooks) and `.mcp.json` load as usual.
-- On PR events the action restores `.claude/` and `CLAUDE.md` from the base branch, so a PR can't rewrite the standards it is reviewed against.
+- On PR events the review workflow restores `.claude/`, `CLAUDE.md` and the standards files (`CODING_STANDARDS.md`, `CONTRIBUTING.md`) from the base branch, so a PR can't rewrite the standards it is reviewed against. The action has a restore of its own, but its docs leave unclear whether it covers a bot's PR run with a `prompt`, so the factory doesn't rely on it ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)).
 
 ### Factory skills (v1)
 

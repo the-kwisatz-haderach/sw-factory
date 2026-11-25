@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Usage: ticket-of <pr-body.md> <head-branch>
+# Prints the ticket an agent PR builds: the first `Closes #<n>` in its body (as
+# the implementer's PR body must say), else the <n> of an `agent/issue-<n>`
+# branch, so an owner-edited body still reviews against its ticket. Exits 1 if
+# neither names one.
+set -euo pipefail
+body="$1" branch="$2"
+if [ -f "$body" ]; then
+  n="$(grep -Eio '(^|[^[:alnum:]_])closes #[0-9]+' "$body" | head -n1 | grep -Eo '[0-9]+$' || true)"
+  if [ -n "$n" ]; then echo "$n"; exit 0; fi
+fi
+case "$branch" in
+  agent/issue-*[!0-9]*|agent/issue-) exit 1 ;;
+  agent/issue-*) echo "${branch#agent/issue-}" ;;
+  *) exit 1 ;;
+esac

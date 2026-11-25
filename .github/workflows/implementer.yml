@@ -162,10 +162,8 @@ jobs:
           # agent's outcome file and PR body can never be committed.
           mkdir -p "$RUN_DIR"
           echo "/$RUN_DIR/" >> .git/info/exclude
-          gh issue view "$TICKET" --json number,title,body,comments --jq '
-            "# #\(.number): \(.title)\n\n\(.body // "")\n"
-            + ([.comments[] | "\n---\n\n**\(.author.login)** commented on \(.createdAt):\n\n\(.body)\n"] | join(""))
-          ' > "$RUN_DIR/ticket.md"
+          gh issue view "$TICKET" --json number,title,body,comments \
+            | "$FACTORY/scripts/ticket-thread" > "$RUN_DIR/ticket.md"
           if [ -n "$PR_NUMBER" ]; then
             fetch() { gh api --paginate --slurp "repos/$GH_REPO/$1?per_page=100" | jq 'add // []'; }
             fetch "issues/$PR_NUMBER/comments" > "$RUNNER_TEMP/pr-comments.json"

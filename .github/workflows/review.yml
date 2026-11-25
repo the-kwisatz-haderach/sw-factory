@@ -1,0 +1,195 @@
+# The automated review task (docs/factory-design.md §8), called by a target
+# repo's stub. Everything here runs in the target repo: its minutes, logs and
+# secrets.
+#
+# A PR from an `agent/issue-<n>` branch, opened or pushed by an allowlisted
+# actor (`claude[bot]`, or the owner pushing a fix by hand), gets a cold
+# review of its head commit: the agent reads the diff, the ticket, the
+# standards and the PR body's Evidence and Merge Danger, and writes a review
+# and a review verdict. Deterministic steps then post one `claude[bot]` comment
+# review with inline comments and set the `factory/review` commit status on the
+# head SHA, `success` or `failure`, linking to the review. The job succeeds
+# either way, so a red job only ever means the run broke.
+#
+# The review never pushes code and never runs checks: the target repo's PR CI
+# is the deterministic gate, and runs alongside this without being read.
+name: review
+
+on:
+  workflow_call:
+    inputs:
+      allowlist:
+        description: >-
+          Comma-separated logins, no spaces, that may start a review. Checked
+          against who performed the triggering action (who opened or pushed),
+          not who opened the PR. `claude[bot]` is on it because its PR opens
+          and pushes are the one trigger the factory names for it.
+        type: string
+        default: "the-kwisatz-haderach,claude[bot]"
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  review:
+    if: >-
+      github.event_name == 'pull_request'
+      && (github.event.action == 'opened' || github.event.action == 'synchronize')
+      && startsWith(github.event.pull_request.head.ref, 'agent/issue-')
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One review per PR: a new push cancels the stale one. The group is the
+    # review's own, so reviews never cancel or get cancelled by implementer
+    # runs. Any other event gets a group of its own run.
+    concurrency:
+      group: review-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+      id-token: write
+    env:
+      # Deliberately no job-level GH_TOKEN: the agent step must not inherit a
+      # token. Each bookkeeping step sets its own.
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      BASE_TIP: ${{ github.event.pull_request.base.sha }}
+      RUN_DIR: .factory-run
+    steps:
+      # The plugin comes from the exact commit of this running workflow, moved
+      # out of the workspace so the target checkout can't see or load it.
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
+      - name: Move the factory plugin out of the workspace
+        run: |
+          mv .factory-plugin "$RUNNER_TEMP/factory"
+          echo "FACTORY=$RUNNER_TEMP/factory" >> "$GITHUB_ENV"
+
+      # A re-delivered event or a re-run never reviews the same commit twice.
+      # A missing, `pending` or `error` status is not a verdict, so the commit
+      # is reviewed.
+      - name: Skip a commit already ruled on
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if verdict="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/status" | "$FACTORY/scripts/review/ruled")"; then
+            echo "\`factory/review\` already ruled \`$verdict\` on $HEAD_SHA; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "REVIEW=true" >> "$GITHUB_ENV"
+          echo "PR: #$PR_NUMBER at $HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      # Full history, for the merge-base. No persisted credentials: the agent
+      # step must hold no GITHUB_TOKEN.
+      - name: Check out the PR head
+        if: env.REVIEW == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The PR can't rewrite the standards it is reviewed against: `.claude/`,
+      # `CLAUDE.md` and the standards files come from the base branch. Only the
+      # working tree changes; the diff still shows what the PR does to them.
+      # The action may restore some of these itself, but not reliably for a
+      # bot's PR run with a `prompt`, so the factory does it.
+      # No factory-setup: the review runs no code from the PR.
+      - name: Prepare the review context
+        if: env.REVIEW == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$FACTORY/scripts/review/restore-base-config" "$BASE_TIP"
+          merge_base="$(git merge-base "$BASE_TIP" HEAD)"
+          echo "MERGE_BASE=$merge_base" >> "$GITHUB_ENV"
+
+          # The run directory is git-ignored for this checkout only.
+          mkdir -p "$RUN_DIR"
+          echo "/$RUN_DIR/" >> .git/info/exclude
+
+          gh pr view "$PR_NUMBER" --json body --jq '.body // ""' > "$RUN_DIR/pr-body.md"
+          if ! ticket="$("$FACTORY/scripts/review/ticket-of" "$RUN_DIR/pr-body.md" "$HEAD_REF")"; then
+            echo "::error::Neither the PR body nor the branch names a ticket."
+            exit 1
+          fi
+          echo "TICKET=$ticket" >> "$GITHUB_ENV"
+          echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
+          gh issue view "$ticket" --json number,title,body,comments \
+            | "$FACTORY/scripts/ticket-thread" > "$RUN_DIR/ticket.md"
+
+          git diff "$merge_base" HEAD > "$RUN_DIR/diff.patch"
+          "$FACTORY/scripts/review/diff-lines" < "$RUN_DIR/diff.patch" > "$RUNNER_TEMP/diff-lines.tsv"
+
+      # No push and no `gh`: the review reads only what was prepared above and
+      # the checkout, and its writes go through the deterministic step below.
+      - name: Review
+        id: claude
+        if: env.REVIEW == 'true'
+        timeout-minutes: 12
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The trigger is often claude[bot]'s own push; the action refuses
+          # bot actors it isn't told about.
+          allowed_bots: "claude[bot]"
+          prompt: |
+            /factory:review
+            PR: #${{ env.PR_NUMBER }}
+            Ticket: #${{ env.TICKET }}
+            Base: ${{ env.MERGE_BASE }} (merge-base with ${{ env.BASE_REF }})
+            Head: ${{ env.HEAD_SHA }}
+            Run directory: ${{ env.RUN_DIR }}/
+          claude_args: >-
+            --plugin-dir ${{ runner.temp }}/factory
+            --add-dir ${{ runner.temp }}/factory
+            --append-system-prompt-file ${{ runner.temp }}/factory/system.md
+            --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
+
+      # Deterministic from here on: the agent never posts or sets statuses.
+      # A missing or malformed outcome or review file breaks the run, and the
+      # commit gets no verdict.
+      - name: Post the review and set factory/review
+        if: env.REVIEW == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! verdict="$("$FACTORY/scripts/review/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/description.txt")"; then
+            echo "::error::The outcome file is missing or malformed."
+            exit 1
+          fi
+          "$FACTORY/scripts/review/review-payload" "$RUN_DIR/review.json" "$RUNNER_TEMP/diff-lines.tsv" \
+            "$HEAD_SHA" "$verdict" "$RUN_URL" > "$RUNNER_TEMP/review-payload.json"
+
+          # The review is posted as claude[bot]; a GitHub App can only comment
+          # on a PR it authored, never approve or request changes.
+          token="$("$FACTORY/scripts/implementer/claude-app-token" mint)"
+          echo "::add-mask::$token"
+          trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
+          review_url="$(GH_TOKEN="$token" gh api --method POST "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
+            --input "$RUNNER_TEMP/review-payload.json" --jq .html_url)"
+
+          # The verdict is a status set with GITHUB_TOKEN, whose events start no runs.
+          case "$verdict" in pass) state=success ;; fail) state=failure ;; esac
+          gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
+            -f state="$state" -f context=factory/review \
+            -f description="$(cat "$RUNNER_TEMP/description.txt")" \
+            -f target_url="$review_url" > /dev/null
+          {
+            echo "Review verdict: \`$verdict\` ($(cat "$RUNNER_TEMP/description.txt"))"
+            echo "Review: $review_url"
+          } >> "$GITHUB_STEP_SUMMARY"
