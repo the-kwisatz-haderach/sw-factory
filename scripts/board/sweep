@@ -35,16 +35,21 @@ field_id="$(jq -r '.field.id // empty' <<<"$project")"
 repos="$(quiet "searching repos by topic" gh search repos --owner "$owner" --topic "$TOPIC" \
   --archived=false --limit 1000 --json fullName --jq '.[].fullName')"
 
-issues='[]' repo_count=0
+# The backlog goes through files, not arguments: one argument is capped at
+# 128 KB on Linux, which a few thousand issues would pass.
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+repo_count=0
+: > "$tmp/issues.json"
 while IFS= read -r repo; do
   [ -n "$repo" ] || continue
   repo_count=$((repo_count + 1))
   page="$(quiet "listing issues in target repo $repo_count" gh issue list -R "$repo" \
     --state open --limit 10000 --json id,labels --jq '[.[] | {id, labels: [.labels[].name]}]')"
-  issues="$(jq -c --argjson more "$page" '. + $more' <<<"$issues")"
+  echo "$page" >> "$tmp/issues.json"
 done <<<"$repos"
 
-items="$(quiet "reading board items" gh api graphql --paginate \
+quiet "reading board items" gh api graphql --paginate \
   -f login="$owner" -F number="$number" -f query='
     query($login: String!, $number: Int!, $endCursor: String) {
       user(login: $login) { projectV2(number: $number) {
@@ -59,10 +64,12 @@ items="$(quiet "reading board items" gh api graphql --paginate \
       } }
     }' --jq '.data.user.projectV2.items.nodes[]
       | {id, content: .content.id, state: .content.state, status: .status.name}' \
-  | jq -sc '.')"
+  > "$tmp/items.json"
 
-actions="$(jq -n --argjson issues "$issues" --argjson items "$items" \
-  '{issues: $issues, items: $items}' | "$here/plan")"
+# jq's errors can quote the data, so they're hidden like gh's.
+quiet "planning the board writes" jq -n --slurpfile issues "$tmp/issues.json" --slurpfile items "$tmp/items.json" \
+  '{issues: ($issues | add // []), items: $items}' > "$tmp/plan-input.json"
+actions="$(quiet "planning the board writes" "$here/plan" < "$tmp/plan-input.json")"
 
 option_for() { jq -r --arg name "$1" '.field.options[] | select(.name == $name) | .id' <<<"$project"; }
 
@@ -111,7 +118,7 @@ while IFS= read -r action; do
   esac
 done < <(jq -c '.[]' <<<"$actions")
 
-summary="${DRY_RUN:+[dry run] }Target repos: $repo_count · open issues: $(jq length <<<"$issues") · board items: $(jq length <<<"$items") · added: $added · Status updated: $updated · failed writes: $failed"
+summary="${DRY_RUN:+[dry run] }Target repos: $repo_count · open issues: $(jq '.issues | length' "$tmp/plan-input.json") · board items: $(jq '.items | length' "$tmp/plan-input.json") · added: $added · Status updated: $updated · failed writes: $failed"
 echo "$summary"
 [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$summary" >> "$GITHUB_STEP_SUMMARY"
 [ "$failed" -eq 0 ] || die "$failed board writes failed"
