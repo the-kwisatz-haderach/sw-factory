@@ -328,6 +328,7 @@ In order:
 8. **Deterministic steps act on the outcome.** The agent never touches labels.
    - **`done`:**
      - Check that `pr-body.md` contains `Closes #<n>` and the headings **Summary**, **Evidence** and **Merge Danger**. If anything is missing, the run counts as failed.
+     - Check that the PR leaves `CLAUDE.md`'s `## Checks` section as the default branch has it, across the whole PR, not just this run's commits. If it differs, the run counts as failed: a change to the checks lands on the default branch first.
      - Push, then open or update the PR as `claude[bot]`, ready for review (not draft), titled with the ticket title, with the run link appended.
      - Set `agent:in-review`.
    - **`needs-human`:** post the agent's comment with the run link, and set `agent:needs-human`. No PR.

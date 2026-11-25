@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Usage: checks-unchanged <default-branch CLAUDE.md> <head CLAUDE.md>
+# Fails if the `## Checks` section differs between the two, so a run can never
+# change the commands it is judged by. The rest of CLAUDE.md may change freely.
+# Prints a diff of the section and exits 1 if it changed.
+set -euo pipefail
+
+# A missing file has no section, so deleting CLAUDE.md counts as a change.
+section_of() { if [ -f "$1" ]; then checks_section "$1"; fi; }
+
+# The `## Checks` section: from its heading up to the next `#`/`##` heading.
+checks_section() {
+  awk '
+    /^```/ { fenced = !fenced }
+    !fenced && /^##?[[:space:]]/ { in_checks = ($0 ~ /^## Checks[[:space:]]*$/) }
+    in_checks { print }
+  ' "$1"
+}
+
+if ! diff -u --label "default branch" --label "this PR" \
+     <(section_of "$1") <(section_of "$2"); then
+  echo "The PR changes CLAUDE.md's ## Checks section; land that change on the default branch first." >&2
+  exit 1
+fi

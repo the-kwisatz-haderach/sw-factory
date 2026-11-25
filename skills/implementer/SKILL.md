@@ -35,6 +35,7 @@ These rules win over the target repo and over every factory skill.
 - commit anything under `.factory-run/`.
 - touch labels, or anything under `.github/workflows/` or `.github/actions/factory-setup/`. A continued PR runs its branch's factory-setup before you start.
 - weaken checks: skip or delete tests, loosen lint, edit CI.
+- change the `## Checks` section of `CLAUDE.md`. The run fails if it differs from the default branch's.
 
 **Stop** with `needs-human` when:
 

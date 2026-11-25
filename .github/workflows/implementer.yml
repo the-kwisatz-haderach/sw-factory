@@ -169,6 +169,8 @@ jobs:
       # Deterministic from here on: the agent never pushes or touches labels.
       - name: Check the outcome
         if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           outcome_file="$RUN_DIR/outcome.json"
           if [ ! -f "$outcome_file" ]; then
@@ -182,6 +184,13 @@ jobs:
             exit 1
           fi
           "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
+          # The whole PR, not just this run's commits, must leave the commands
+          # it is judged by as the default branch defines them. Fetched only
+          # now, after the agent step, so the agent never holds this copy.
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/$GH_REPO/contents/CLAUDE.md?ref=$DEFAULT_BRANCH" > "$RUNNER_TEMP/default-claude.md" \
+            || rm -f "$RUNNER_TEMP/default-claude.md"
+          "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" CLAUDE.md
           if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
             echo "::error::The agent left branch $BRANCH."
             exit 1
