@@ -99,7 +99,7 @@ flowchart TD
 | Runner | **GitHub-hosted Actions runners** (a fresh VM per job) in the target repo | [#7](https://github.com/the-kwisatz-haderach/sw-factory/issues/7) |
 | Observability platform | **Langfuse Cloud, Hobby plan (free, no card), EU region**, plus Actions run pages, transcript artifacts and job summaries | [#16](https://github.com/the-kwisatz-haderach/sw-factory/issues/16) |
 
-The model is Claude Code via `anthropics/claude-code-action`, paid for by the subscription ([#3](https://github.com/the-kwisatz-haderach/sw-factory/issues/3)).
+The model is Claude Code via `anthropics/claude-code-action`, paid for by the subscription ([#3](https://github.com/the-kwisatz-haderach/sw-factory/issues/3)). Automated review pins Opus (`--model claude-opus-5-5`); the implementer runs on the action's default model ([§8](#8-task-automated-review)).
 
 With no ticket source, the skill's question "what stops a ticket source filing the same ticket twice?" doesn't apply in v1.
 
@@ -407,6 +407,7 @@ Decided in [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11) a
 - `factory:review` runs two axes as parallel sub-agents, plus the smell baseline:
   - **Standards:** the standards file(s) + `domain-modeling` + `codebase-design`
   - **Spec:** the ticket + Evidence
+- **Model: Opus**, pinned in the review step with `--model claude-opus-5-5`. On the action's default model (Sonnet) the review skipped both sub-agents and reviewed alone (run 45662633304 on the test target repo); on Opus it ran both in parallel, with the Standards axis loading `codebase-design` and `domain-modeling` (run 45667656942), at about four times the usage ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)).
 - **Fails** on any of:
   - the change doesn't do what the ticket asks
   - a correctness bug
