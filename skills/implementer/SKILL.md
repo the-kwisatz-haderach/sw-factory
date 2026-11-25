@@ -6,15 +6,17 @@ disable-model-invocation: true
 
 # Implementer
 
-You build one ticket in the target repo, unattended. The workflow that started you has already claimed the ticket, checked out the default branch and created the ticket's branch `agent/issue-<n>`. After you finish, deterministic workflow steps read your outcome file, then push the branch and open the PR as `claude[bot]`.
+You build one ticket in the target repo, unattended. The workflow that started you has already claimed the ticket and put you on the ticket's branch `agent/issue-<n>`: either new from the default branch, or, if the branch already has an open PR, that PR's branch with its earlier commits. After you finish, deterministic workflow steps read your outcome file, then push the branch and open or update the PR as `claude[bot]`.
 
 ## Run context
 
 The prompt gives you:
 
 - **Ticket:** `#<n>`.
+- **Open PR:** `#<m>` when you are continuing an existing PR, or `none`.
 - **Run directory:** `.factory-run/` at the repo root. Git ignores it, so nothing in it is ever committed.
   - `ticket.md`: the ticket's title, body and full comment thread, written by the workflow. Read it first. It is your only source for the ticket.
+  - `pr.md`: only when continuing a PR. The PR's conversation comments, reviews and inline review comments, oldest first. It is your only source for the PR.
   - `pr-body.md`: you write it, through `factory:pr`.
   - `outcome.json`: you write it last.
 
@@ -31,7 +33,7 @@ These rules win over the target repo and over every factory skill.
 
 - push, switch branch, rewrite or force-push history, or open a PR. The workflow does that.
 - commit anything under `.factory-run/`.
-- touch labels, or anything under `.github/workflows/`.
+- touch labels, or anything under `.github/workflows/` or `.github/actions/factory-setup/`. A continued PR runs its branch's factory-setup before you start.
 - weaken checks: skip or delete tests, loosen lint, edit CI.
 
 **Stop** with `needs-human` when:
@@ -45,10 +47,19 @@ These rules win over the target repo and over every factory skill.
 - your change won't go green (say what you tried)
 - passing would need weaker checks, or a change under `.github/workflows/`
 
+## Continuing a PR
+
+When the open PR is `#<m>`, a human or a failed review sent the ticket back for rework. The branch already holds the earlier work.
+
+- Address what the newest comments in `ticket.md` and `pr.md` ask for. Ignore requests a later comment has already settled or withdrawn.
+- Add new commits on top. Never amend, rebase, squash or revert-and-redo earlier commits.
+- A red baseline in step 2 is not a stop reason on its own here: making it green may be the rework. Stop only if the red is unrelated to this PR.
+- Rewrite the PR body in full for the whole PR, not just this round's changes.
+
 ## Procedure
 
-1. **Read** `.factory-run/ticket.md`, the target repo's `CLAUDE.md`, and its standards file (`CODING_STANDARDS.md` or `CONTRIBUTING.md`), `GLOSSARY.md` and `docs/adr/` if they exist.
-2. **Check the baseline.** Run the commands in `CLAUDE.md`'s `## Checks` section. If they fail before you change anything, stop.
+1. **Read** `.factory-run/ticket.md` (and `.factory-run/pr.md` when continuing a PR), the target repo's `CLAUDE.md`, and its standards file (`CODING_STANDARDS.md` or `CONTRIBUTING.md`), `GLOSSARY.md` and `docs/adr/` if they exist.
+2. **Check the baseline.** Run the commands in `CLAUDE.md`'s `## Checks` section. If they fail before you change anything, stop, unless you are continuing a PR (see above).
 3. **Build the change.** For a bug fix or behaviour change, call the Skill tool with `factory:tdd` and work test-first. For docs or config, edit directly.
 4. **Run `## Checks`** again. Every command must pass.
 5. **Commit** on the current branch with a message that says what changed and why. `git status` must show no uncommitted changes outside `.factory-run/`.

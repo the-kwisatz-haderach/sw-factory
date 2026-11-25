@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: pr-context < {number, title, url, reviews, review_comments, comments}
+# Renders an open PR's feedback as Markdown for the agent, oldest first.
+# number/title/url come from `gh pr view`; the three lists are the REST shapes of
+# GET pulls/<n>/reviews, pulls/<n>/comments (inline) and issues/<n>/comments
+# (conversation). Reviews without a body (a bare approval, or one that only
+# holds inline comments) are skipped; their inline comments still appear.
+set -euo pipefail
+jq -r '
+  def entries:
+    [ (.comments[] | {at: .created_at, who: (.user.login // "ghost"), what: "commented", body}),
+      (.reviews[] | select((.body // "") != "")
+        | {at: .submitted_at, who: (.user.login // "ghost"), what: "reviewed (\(.state))", body}),
+      (.review_comments[]
+        | (if .line == null then "line \(.original_line // "?") (outdated)" else "line \(.line)" end) as $where
+        | {at: .created_at, who: (.user.login // "ghost"), what: "commented on `\(.path)` \($where)", body}) ];
+  "# PR #\(.number): \(.title)\n\n\(.url)\n"
+  + (entries
+     | sort_by(.at)
+     | map("\n---\n\n**\(.who)** \(.what) on \(.at):\n\n\(.body)\n")
+     | join(""))
+'

@@ -4,6 +4,8 @@
 # Happy path only so far: an allowlisted actor adds `agent:ready`, the run
 # claims the oldest ready ticket, the agent builds it with the factory plugin,
 # and on outcome `done` the branch is pushed and the PR opened as `claude[bot]`.
+# If the ticket's branch already has an open PR, the run continues that PR
+# instead: new commits on its branch, no force-push, the body rewritten.
 name: implementer
 
 on:
@@ -28,6 +30,7 @@ jobs:
       github.event_name == 'issues'
       && github.event.action == 'labeled'
       && github.event.label.name == 'agent:ready'
+      && !github.event.issue.pull_request
       && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
       && !endsWith(github.triggering_actor, '[bot]')
     runs-on: ubuntu-latest
@@ -81,12 +84,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:ready --add-label agent:in-progress
 
+      # An open PR from the ticket's branch means rework on request: the run
+      # continues that PR rather than starting over from the default branch.
+      - name: Find an open PR to continue
+        if: env.TICKET != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="$(gh pr list --head "$BRANCH" --state open --json number,isCrossRepository \
+            | "$FACTORY/scripts/implementer/pr-to-continue")"
+          echo "PR_NUMBER=$pr" >> "$GITHUB_ENV"
+          if [ -n "$pr" ]; then
+            echo "Continuing PR #$pr" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # No persisted credentials: the agent step must hold no GITHUB_TOKEN, and
       # the push step brings its own.
       - name: Check out the target repo
         if: env.TICKET != ''
         uses: actions/checkout@v6
         with:
+          # The PR branch when continuing a PR, else the default branch.
+          ref: ${{ env.PR_NUMBER != '' && env.BRANCH || '' }}
           persist-credentials: false
 
       - name: Run the target repo's factory-setup
@@ -98,7 +117,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git checkout -b "$BRANCH"
+          # When continuing a PR the checkout is already on its branch, and
+          # BASE_SHA is the PR's head, so the checks below see only new commits.
+          if [ -z "$PR_NUMBER" ]; then
+            git checkout -b "$BRANCH"
+          fi
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           # The run directory is git-ignored for this checkout only, so the
           # agent's outcome file and PR body can never be committed.
@@ -108,6 +131,18 @@ jobs:
             "# #\(.number): \(.title)\n\n\(.body // "")\n"
             + ([.comments[] | "\n---\n\n**\(.author.login)** commented on \(.createdAt):\n\n\(.body)\n"] | join(""))
           ' > "$RUN_DIR/ticket.md"
+          if [ -n "$PR_NUMBER" ]; then
+            fetch() { gh api --paginate --slurp "repos/$GH_REPO/$1?per_page=100" | jq 'add // []'; }
+            fetch "issues/$PR_NUMBER/comments" > "$RUNNER_TEMP/pr-comments.json"
+            fetch "pulls/$PR_NUMBER/reviews" > "$RUNNER_TEMP/pr-reviews.json"
+            fetch "pulls/$PR_NUMBER/comments" > "$RUNNER_TEMP/pr-review-comments.json"
+            gh pr view "$PR_NUMBER" --json number,title,url \
+              | jq --slurpfile comments "$RUNNER_TEMP/pr-comments.json" \
+                   --slurpfile reviews "$RUNNER_TEMP/pr-reviews.json" \
+                   --slurpfile review_comments "$RUNNER_TEMP/pr-review-comments.json" \
+                   '. + {comments: $comments[0], reviews: $reviews[0], review_comments: $review_comments[0]}' \
+              | "$FACTORY/scripts/implementer/pr-context" > "$RUN_DIR/pr.md"
+          fi
 
       - name: Implement
         id: claude
@@ -124,6 +159,7 @@ jobs:
             /factory:implementer
             Ticket: #${{ env.TICKET }}
             Run directory: ${{ env.RUN_DIR }}/
+            ${{ env.PR_NUMBER != '' && format('Open PR: #{0}', env.PR_NUMBER) || 'Open PR: none' }}
           claude_args: >-
             --plugin-dir ${{ runner.temp }}/factory
             --add-dir ${{ runner.temp }}/factory
@@ -153,7 +189,7 @@ jobs:
             echo "::error::Outcome is 'done' but the agent made no commits."
             exit 1
           fi
-          forbidden="$(git diff --name-only "$BASE_SHA" HEAD | grep -E "^(\.github/workflows/|$RUN_DIR/)" || true)"
+          forbidden="$(git diff --name-only "$BASE_SHA" HEAD | grep -E "^(\.github/workflows/|\.github/actions/factory-setup/|$RUN_DIR/)" || true)"
           if [ -n "$forbidden" ]; then
             echo "::error::The agent committed files it must never touch: $forbidden"
             exit 1
@@ -171,15 +207,23 @@ jobs:
           echo "::add-mask::$token"
           trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
 
+          # A plain push, never a force-push: continuing a PR only adds commits.
           git -c "http.${GITHUB_SERVER_URL}/.extraheader=" push \
             "https://x-access-token:${token}@${GITHUB_SERVER_URL#https://}/${GH_REPO}.git" \
             "HEAD:refs/heads/$BRANCH"
 
           title="$(GH_TOKEN="$GITHUB_TOKEN_FOR_READS" gh issue view "$TICKET" --json title --jq .title)"
           { cat "$RUN_DIR/pr-body.md"; printf '\n\n---\n\nRun: %s\n' "$RUN_URL"; } > "$RUNNER_TEMP/pr-body.md"
-          pr_url="$(GH_TOKEN="$token" gh pr create \
-            --base "$DEFAULT_BRANCH" --head "$BRANCH" \
-            --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
+          if [ -n "$PR_NUMBER" ]; then
+            # Same PR: the body is rewritten in full, the title follows the ticket.
+            GH_TOKEN="$token" gh pr edit "$PR_NUMBER" \
+              --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+            pr_url="$(GH_TOKEN="$GITHUB_TOKEN_FOR_READS" gh pr view "$PR_NUMBER" --json url --jq .url)"
+          else
+            pr_url="$(GH_TOKEN="$token" gh pr create \
+              --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+              --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
+          fi
           echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Move the ticket to in-review

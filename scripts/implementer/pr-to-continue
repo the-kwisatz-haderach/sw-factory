@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Usage: gh pr list --head agent/issue-<n> --state open --json number,isCrossRepository | pr-to-continue
+# Prints the number of the open PR the run should continue: the one whose head
+# branch lives in this repo. A fork's PR with the same branch name is not ours.
+# Prints nothing if there is none, and the run branches from the default branch.
+set -euo pipefail
+jq -r '[.[] | select(.isCrossRepository | not)] | first | .number // empty'
