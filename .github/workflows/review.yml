@@ -165,10 +165,16 @@ jobs:
             Base: ${{ env.MERGE_BASE }} (merge-base with ${{ env.BASE_REF }})
             Head: ${{ env.HEAD_SHA }}
             Run directory: ${{ env.RUN_DIR }}/
+          # allowed_bots turns off the action's default auto permission mode,
+          # so every tool not allowed here is denied: reading, read-only git,
+          # skills and sub-agents, and Write for the two files in the run
+          # directory. Nothing written can leave the read-only job except
+          # through the verdict artifact.
           claude_args: >-
             --plugin-dir ${{ runner.temp }}/factory
             --add-dir ${{ runner.temp }}/factory
             --append-system-prompt-file ${{ runner.temp }}/factory/system.md
+            --allowedTools "Read,Glob,Grep,Write,Skill,Agent,Task,TodoWrite,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(ls:*)"
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
 
       # Missing files are judged by the post job, which fails the run.
