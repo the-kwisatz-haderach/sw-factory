@@ -4,7 +4,7 @@
 # `#`/`##` heading, ignoring headings inside code fences. Exits 1 if the file
 # or the section is missing.
 set -euo pipefail
-[ -f "$1" ] || exit 1
+[ -f "${1:-}" ] || exit 1
 awk '
   /^```/ { fenced = !fenced }
   !fenced && /^##?[[:space:]]/ { in_checks = ($0 ~ /^## Checks[[:space:]]*$/); if (in_checks) found = 1 }

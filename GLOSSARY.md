@@ -13,7 +13,7 @@ A repository the factory builds software in, after the repo has explicitly opted
 _Avoid_: project repo, client repo, downstream repo, consumer repo
 
 **Ticket state**:
-Where a ticket stands in the factory's flow, exactly one at a time: Triage (not yet handed to the factory), Ready (handed to the factory), In progress (a run has claimed it), In review (its PR waits for review), Needs human (an agent handed it back on purpose, with a question or a give-up), Failed (a run broke while working on it), Done.
+Where a ticket stands in the factory's flow, exactly one at a time: Triage (not yet handed to the factory), Ready (handed to the factory), In progress (a run has claimed it), In review (its PR waits for review), Needs human (handed back on purpose for a human to change something first: an agent's question or give-up, or a run the factory can't start or judge as things stand), Failed (a run broke while working on it), Done.
 _Avoid_: status, stage, column
 
 **Review verdict**:

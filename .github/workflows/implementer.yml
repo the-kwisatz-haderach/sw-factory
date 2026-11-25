@@ -214,7 +214,8 @@ jobs:
           fi
 
       # Deterministic from here on: the agent never pushes or touches labels.
-      # Sets `kind`: done, needs-human or checks-changed. A missing or
+      # Sets `route`: what happens next. The agent's `done` or `needs-human`,
+      # or `checks-changed` when the branch changes `## Checks`. A missing or
       # malformed outcome file, or a `done` that breaks the contract, fails
       # the run instead.
       - name: Check the outcome
@@ -223,25 +224,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! kind="$("$FACTORY/scripts/implementer/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/agent-comment.md")"; then
+          if ! outcome="$("$FACTORY/scripts/implementer/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/agent-comment.md")"; then
             echo "::error::The outcome file is missing or malformed."
             exit 1
           fi
-          echo "Outcome: \`$kind\`" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$kind" = "done" ]; then
+          echo "Outcome: \`$outcome\`" >> "$GITHUB_STEP_SUMMARY"
+          route="$outcome"
+          if [ "$route" = "done" ]; then
             # The whole PR, not just this run's commits, must leave the
             # commands it is judged by as the default branch defines them.
             # Fetched only now, after the agent step, so the agent never
             # holds this copy. A retry can't fix a change here, so it goes
             # to a human rather than failing the run.
             "$FACTORY/scripts/implementer/fetch-default-claude-md" "$RUNNER_TEMP/default-claude.md"
-            if ! "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" CLAUDE.md \
+            # Committed CLAUDE.md only: uncommitted edits are never pushed.
+            git show HEAD:CLAUDE.md > "$RUNNER_TEMP/head-claude.md" 2>/dev/null || rm -f "$RUNNER_TEMP/head-claude.md"
+            if ! "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" "$RUNNER_TEMP/head-claude.md" \
                  > "$RUNNER_TEMP/checks-diff.txt"; then
-              kind="checks-changed"
+              route="checks-changed"
               echo "Branch changes \`CLAUDE.md\`'s \`## Checks\` section; handed back." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-          if [ "$kind" = "done" ]; then
+          if [ "$route" = "done" ]; then
             "$FACTORY/scripts/implementer/check-pr-body" "$RUN_DIR/pr-body.md" "$TICKET"
             if [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
               echo "::error::The agent left branch $BRANCH."
@@ -260,17 +264,17 @@ jobs:
               echo "::warning::Uncommitted changes left by the agent are not pushed."
             fi
           fi
-          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
 
       # Nothing is pushed. The agent's own question is posted as claude[bot],
       # the factory's notes and the label as GITHUB_TOKEN.
       - name: Hand the ticket back to a human
-        if: steps.outcome.outputs.kind == 'needs-human' || steps.outcome.outputs.kind == 'checks-changed'
+        if: steps.outcome.outputs.route == 'needs-human' || steps.outcome.outputs.route == 'checks-changed'
         env:
           GH_TOKEN: ${{ github.token }}
-          KIND: ${{ steps.outcome.outputs.kind }}
+          ROUTE: ${{ steps.outcome.outputs.route }}
         run: |
-          if [ "$KIND" = "needs-human" ]; then
+          if [ "$ROUTE" = "needs-human" ]; then
             token="$("$FACTORY/scripts/implementer/claude-app-token" mint)"
             echo "::add-mask::$token"
             trap '"$FACTORY/scripts/implementer/claude-app-token" revoke "$token"' EXIT
@@ -280,9 +284,11 @@ jobs:
             {
               echo "The work on \`$BRANCH\` changes \`CLAUDE.md\`'s \`## Checks\` section, so it can't be judged by the commands on \`$DEFAULT_BRANCH\`. A retry can't pass until that change lands on \`$DEFAULT_BRANCH\` or is dropped from the branch. Then re-add \`agent:ready\`."
               echo
-              echo '```diff'
+              # Tildes: the section's own ``` fence shows up in the diff as
+              # " ```", which would close a backtick fence early.
+              echo '~~~~diff'
               cat "$RUNNER_TEMP/checks-diff.txt"
-              echo '```'
+              echo '~~~~'
               echo
               echo "Run: $RUN_URL"
             } | gh issue comment "$TICKET" --body-file -
@@ -290,7 +296,7 @@ jobs:
           gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:needs-human
 
       - name: Push and open the PR as claude[bot]
-        if: steps.outcome.outputs.kind == 'done'
+        if: steps.outcome.outputs.route == 'done'
         env:
           GITHUB_TOKEN_FOR_READS: ${{ github.token }}
         run: |
@@ -330,7 +336,7 @@ jobs:
           echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Move the ticket to in-review
-        if: steps.outcome.outputs.kind == 'done'
+        if: steps.outcome.outputs.route == 'done'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:in-review
