@@ -1,0 +1,41 @@
+# The board sweep (docs/factory-design.md §9): a bookkeeping job, not a task.
+# No agent runs here. It mirrors every target repo's open issues and their
+# `agent:` labels onto the owner's Projects board.
+#
+# The classic PAT (`BOARD_PAT`, `project` + `repo`) is the only token that can
+# write to a user-owned project. It lives only in this repo and only in the
+# sweep step's env. This workflow has no agent step, and the reusable
+# workflows the target repos call never receive it. This repo is public, so
+# the sweep logs counts only.
+name: board sweep
+
+on:
+  schedule:
+    # Hourly, off the top of the hour, when scheduled runs are most often
+    # delayed. The board lags the labels by up to an hour.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: board-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/board
+
+      - name: Sweep the board
+        env:
+          GH_TOKEN: ${{ secrets.BOARD_PAT }}
+          OWNER: ${{ github.repository_owner }}
+          PROJECT_NUMBER: ${{ vars.BOARD_PROJECT_NUMBER }}
+        run: scripts/board/sweep "$OWNER" "$PROJECT_NUMBER"

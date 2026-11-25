@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Usage: GH_TOKEN=<classic PAT> sweep <owner> <project-number>
+#        DRY_RUN=1 ... reads everything and counts the writes it would make,
+#        but writes nothing.
+#
+# The board sweep (docs/factory-design.md §9): finds the target repos by the
+# `sw-factory-target` topic, adds every open issue in them to the owner's
+# Projects board and sets its Status from its `agent:` label. The decisions are
+# made by `plan`; this script only reads and writes GitHub.
+#
+# It runs in the public factory repo, so it logs counts only. gh's own error
+# messages can name a private repo, so they are never shown; a failure names
+# the step instead.
+set -euo pipefail
+owner="${1:?owner required}" number="${2:?project number required}"
+here="$(cd "$(dirname "$0")" && pwd)"
+TOPIC=sw-factory-target
+
+die() { echo "::error::Board sweep failed: $1" >&2; exit 1; }
+# quiet <step> <command...>: runs the command with its stderr hidden.
+quiet() { local step="$1"; shift; "$@" 2>/dev/null || die "$step"; }
+
+project="$(quiet "reading project $number" gh api graphql \
+  -f login="$owner" -F number="$number" -f query='
+    query($login: String!, $number: Int!) {
+      user(login: $login) { projectV2(number: $number) {
+        id
+        field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+      } }
+    }' --jq '.data.user.projectV2')"
+project_id="$(jq -r '.id' <<<"$project")"
+field_id="$(jq -r '.field.id // empty' <<<"$project")"
+[ -n "$field_id" ] || die "the board has no single-select Status field"
+
+repos="$(quiet "searching repos by topic" gh search repos --owner "$owner" --topic "$TOPIC" \
+  --archived=false --limit 1000 --json fullName --jq '.[].fullName')"
+
+issues='[]' repo_count=0
+while IFS= read -r repo; do
+  [ -n "$repo" ] || continue
+  repo_count=$((repo_count + 1))
+  page="$(quiet "listing issues in target repo $repo_count" gh issue list -R "$repo" \
+    --state open --limit 10000 --json id,labels --jq '[.[] | {id, labels: [.labels[].name]}]')"
+  issues="$(jq -c --argjson more "$page" '. + $more' <<<"$issues")"
+done <<<"$repos"
+
+items="$(quiet "reading board items" gh api graphql --paginate \
+  -f login="$owner" -F number="$number" -f query='
+    query($login: String!, $number: Int!, $endCursor: String) {
+      user(login: $login) { projectV2(number: $number) {
+        items(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+            content { ... on Issue { id state } }
+          }
+        }
+      } }
+    }' --jq '.data.user.projectV2.items.nodes[]
+      | {id, content: .content.id, state: .content.state, status: .status.name}' \
+  | jq -sc '.')"
+
+actions="$(jq -n --argjson issues "$issues" --argjson items "$items" \
+  '{issues: $issues, items: $items}' | "$here/plan")"
+
+option_for() { jq -r --arg name "$1" '.field.options[] | select(.name == $name) | .id' <<<"$project"; }
+
+set_status() { # <item-id> <status-name>
+  local option; option="$(option_for "$2")"
+  [ -n "$option" ] || { echo "::error::The Status field has no option '$2'." >&2; return 1; }
+  gh api graphql -f project="$project_id" -f item="$1" -f field="$field_id" -f option="$option" -f query='
+    mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+      updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field,
+        value: {singleSelectOptionId: $option}}) { projectV2Item { id } }
+    }' >/dev/null 2>&1
+}
+
+add_item() { # <content-id>, prints the new item's id
+  gh api graphql -f project="$project_id" -f content="$1" -f query='
+    mutation($project: ID!, $content: ID!) {
+      addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
+    }' --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null
+}
+
+if [ -n "${DRY_RUN:-}" ]; then
+  add_item() { echo dry-run; }
+  set_status() { :; }
+fi
+
+added=0 updated=0 failed=0
+while IFS= read -r action; do
+  [ -n "$action" ] || continue
+  status="$(jq -r '.status' <<<"$action")"
+  case "$(jq -r '.action' <<<"$action")" in
+    add)
+      if item="$(add_item "$(jq -r '.content' <<<"$action")")" && [ -n "$item" ] \
+        && set_status "$item" "$status"; then
+        added=$((added + 1))
+      else
+        failed=$((failed + 1))
+      fi
+      ;;
+    set)
+      if set_status "$(jq -r '.item' <<<"$action")" "$status"; then
+        updated=$((updated + 1))
+      else
+        failed=$((failed + 1))
+      fi
+      ;;
+  esac
+done < <(jq -c '.[]' <<<"$actions")
+
+summary="${DRY_RUN:+[dry run] }Target repos: $repo_count · open issues: $(jq length <<<"$issues") · board items: $(jq length <<<"$items") · added: $added · Status updated: $updated · failed writes: $failed"
+echo "$summary"
+[ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+[ "$failed" -eq 0 ] || die "$failed board writes failed"

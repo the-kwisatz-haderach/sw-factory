@@ -142,7 +142,7 @@ target repo (private)                              factory repo (public)
 | Langfuse upload script | Turns the action's `execution_file` into one trace ([§11](#11-observability)) |
 | `scripts/opt-in` | Converging opt-in, `--check` and `--opt-out` ([§12](#12-opting-a-target-repo-in)) |
 | rotation script | Sets new secrets across every opted-in repo; shares code with `scripts/opt-in` |
-| board sweep workflow (cron) | Syncs the Projects board from target-repo labels ([§9](#9-bookkeeping-jobs)) |
+| `.github/workflows/board-sweep.yml`, `scripts/board/` | Board sweep (cron): syncs the Projects board from target-repo labels ([§9](#9-bookkeeping-jobs)) |
 | rotation reminder workflow (monthly cron) | Opens a "rotate credentials" issue ([§4](#4-identity-and-secrets)) |
 | `docs/opt-in.md` | What a target repo must, should and may contain |
 
@@ -454,8 +454,11 @@ These aren't tasks: no agent runs in them. They live in the **factory repo**, wh
 
 | Job | Trigger | Does | Token |
 | --- | --- | --- | --- |
-| Board sweep | schedule (cadence left to the builder; the board lags by up to one sweep) | Finds target repos by topic, adds every open issue to the board (`addProjectV2ItemById`, idempotent), and sets Status from its `agent:` label | classic PAT |
+| Board sweep | hourly at :17 (`17 * * * *`), plus `workflow_dispatch`; the board lags the labels by up to an hour | Finds target repos by topic, adds every open issue to the board (`addProjectV2ItemById`, idempotent), sets Status from its `agent:` label (Triage when there's none), and moves closed tickets to Done. It writes only what differs, so an unchanged backlog costs no writes. 5-minute timeout. | classic PAT |
 | Rotation reminder | monthly schedule | Opens a "rotate credentials" issue 30 days before the shared expiry date | `GITHUB_TOKEN` |
+
+- **Why hourly:** the board is a view the owner checks a few times a day, not a trigger, so an hour's lag costs nothing. The sweep reads the whole backlog each time, and the classic PAT shares the owner's GraphQL rate limit, so it shouldn't run more often than it's needed. Scheduled runs in a public repo are disabled after 60 days without activity in it; re-enable the workflow if the board goes stale.
+- **Built in** `.github/workflows/board-sweep.yml`, with the logic in `scripts/board/` (`plan` decides the writes, `sweep` talks to GitHub).
 
 The board is a write-only view. `projects_v2_item` webhooks are org-only, so nothing triggers from it ([#6](https://github.com/the-kwisatz-haderach/sw-factory/issues/6)).
 
@@ -587,7 +590,7 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 7 | The exact shape of `rate_limit` and `authentication_failed` in `execution_file` | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 8 | Counting today's implementer runs via the API when both tasks share the stub workflow (count **jobs by name**, not workflow runs) | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 9 | Langfuse Hobby over the 50k-unit cap rejects data rather than billing | — | [#16](https://github.com/the-kwisatz-haderach/sw-factory/issues/16) |
-| 10 | `gh search repos --topic` returns private repos under the sweep's classic PAT | — | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
+| 10 | `gh search repos --topic` returns private repos under the sweep's classic PAT | **Answered: yes** ([#38](https://github.com/the-kwisatz-haderach/sw-factory/issues/38)). Run under the owner's token with the same `repo` + `project` scopes, it returns the private `sw-factory-target` repo. The sweep logs its target repo count, so its first run confirms this under the PAT itself. | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 11 | Adding a repo to the Claude App installation can't be scripted with the owner's token (assumed, hence the printed link) | if it can, script it | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 12 | Whether a single `setup-token` token can be revoked on its own | — | [#3](https://github.com/the-kwisatz-haderach/sw-factory/issues/3) |
 | 13 | **Where unmerged-PR-close handling runs.** [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) gives it to the board sweep; [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) subscribes the stub to `pull_request: closed`. The stub path writes the label with `GITHUB_TOKEN` at once and starts no run; a label written by the sweep's PAT would show up as the owner's and start a no-op implementer run. Recommended: the stub path. | the sweep, as in [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) | reconciliation of [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) and [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Usage: plan < {"issues": [...], "items": [...]}
+#   issues: every open issue in every target repo, as {id, labels: [name]}
+#   items:  every item on the board, as {id, content, state, status}, where
+#           content is the issue's node id and state OPEN or CLOSED (null for
+#           drafts)
+# Prints the board writes that make Status mirror each ticket's state
+# (docs/factory-design.md §5), as a JSON array of
+#   {action: "add", content, status}  for an open issue not yet on the board
+#   {action: "set", item, status}     for an item whose Status is stale
+# Nothing is printed for an item that's already right, so a second sweep over
+# an unchanged backlog writes nothing. Items the sweep didn't fetch (drafts,
+# open issues in a repo that's no longer a target) are left alone.
+set -euo pipefail
+jq '
+  {"agent:ready": "Ready", "agent:in-progress": "In progress", "agent:in-review": "In review",
+   "agent:needs-human": "Needs human", "agent:failed": "Failed"} as $status
+  | def status_of: first(.labels[] | $status[.] // empty) // "Triage";
+  (.items | map(select(.content != null) | {key: .content, value: .}) | from_entries) as $on_board
+  | [ (.issues[] | status_of as $want | $on_board[.id] as $item
+       | if $item == null then {action: "add", content: .id, status: $want}
+         elif $item.status != $want then {action: "set", item: $item.id, status: $want}
+         else empty end),
+      (.items[] | select(.state == "CLOSED" and .status != "Done")
+       | {action: "set", item: .id, status: "Done"}) ]'
