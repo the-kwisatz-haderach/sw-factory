@@ -1,7 +1,6 @@
 ---
 name: diagnosing-bugs
-description: Diagnosis loop for bugs and performance regressions in an unattended factory run. Called by a factory task skill at a fixed step, before factory:tdd, for a bug-fix ticket.
-disable-model-invocation: true
+description: Diagnosis loop for bugs and performance regressions in an unattended factory run. Called by a factory task skill at a fixed step, before factory:tdd, for a bug-fix ticket. Use only when a factory task skill (factory:implementer or factory:review) calls for it, never for a general request.
 metadata:
   upstream:
     source: mattpocock-skills

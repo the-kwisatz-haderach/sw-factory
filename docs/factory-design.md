@@ -253,7 +253,7 @@ Decided in [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17).
   - `factory:domain-modeling`
   - `factory:pr`
   - upstream `code-review`, folded into `factory:review`
-- **Fixed steps, not model choice.** All factory skills are `disable-model-invocation: true`. The task skill invokes them at fixed points ([§7](#7-task-implementer), [§8](#8-task-automated-review)).
+- **Fixed steps, not model choice.** The task skill invokes the factory skills at fixed points ([§7](#7-task-implementer), [§8](#8-task-automated-review)), through the Skill tool. Factory skills therefore stay model-invocable: `disable-model-invocation: true` makes the Skill tool refuse a skill, which would block the task skill too. Instead, each factory skill's `description` restricts it to calls from a task skill ([#25](https://github.com/the-kwisatz-haderach/sw-factory/issues/25)).
 - **Same-name override:** a target-repo skill with the exact name (`tdd`, `diagnosing-bugs`, `codebase-design`, `domain-modeling`, `pr`) replaces the factory skill at that step entirely, with no merging.
   - The task contract and the deterministic checks still win over both.
   - Which version ran is logged in the job summary and as a Langfuse attribute.
@@ -579,7 +579,7 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | # | Check | If it fails | Source |
 | --- | --- | --- | --- |
 | 1 | `--plugin-dir` passes through `claude_args` in `claude-code-action` | `plugin_marketplaces: ./<path>` + `plugins: factory@…` | [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17) |
-| 2 | A leading `/factory:implementer` in the action's `prompt` is expanded | prompt "invoke the Skill tool with `factory:implementer`" | [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17) |
+| 2 | A leading `/factory:implementer` in the action's `prompt` is expanded | prompt "invoke the Skill tool with `factory:implementer`", which also means dropping `disable-model-invocation: true` from the task skills, since the Skill tool refuses flagged skills ([#25](https://github.com/the-kwisatz-haderach/sw-factory/issues/25)) | [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17) |
 | 3 | The nested factory checkout loads no duplicate skills | check the target out into a sibling directory | [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17) |
 | 4 | A follow-up job with `if: failure() \|\| cancelled()` runs after a timed-out or cancelled agent job | (none given; it's the reason for the separate job) | [#10](https://github.com/the-kwisatz-haderach/sw-factory/issues/10) |
 | 5 | `claude[bot]` pushes and PRs trigger the target repo's CI and the stub's review job | (none given; the design depends on it) | [#5](https://github.com/the-kwisatz-haderach/sw-factory/issues/5) |

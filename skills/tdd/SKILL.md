@@ -1,7 +1,6 @@
 ---
 name: tdd
-description: Test-driven development for an unattended factory run. Called by a factory task skill at a fixed step to build a bug fix or behaviour change test-first.
-disable-model-invocation: true
+description: Test-driven development for an unattended factory run. Called by a factory task skill at a fixed step to build a bug fix or behaviour change test-first. Use only when a factory task skill (factory:implementer or factory:review) calls for it, never for a general request.
 metadata:
   upstream:
     source: mattpocock-skills

@@ -1,7 +1,6 @@
 ---
 name: domain-modeling
-description: Keep a target repo's domain model sharp in an unattended factory run. Called by a factory task skill at a fixed step when a change introduces or renames a concept; updates GLOSSARY.md and records ADRs for decisions already made in the ticket thread.
-disable-model-invocation: true
+description: Keep a target repo's domain model sharp in an unattended factory run. Called by a factory task skill at a fixed step when a change introduces or renames a concept; updates GLOSSARY.md and records ADRs for decisions already made in the ticket thread. Use only when a factory task skill (factory:implementer or factory:review) calls for it, never for a general request.
 metadata:
   upstream:
     source: mattpocock-skills

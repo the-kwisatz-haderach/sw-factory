@@ -8,7 +8,7 @@ Re-syncing is a deliberate factory-repo PR: diff this directory against the new 
 
 Common to every factory skill:
 
-- `disable-model-invocation: true`: a factory task skill calls this skill at a fixed step; the model never picks it.
+- Model-invocable, so a factory task skill can call it through the Skill tool at a fixed step (`disable-model-invocation: true` blocks the Skill tool). The `description` restricts it to task-skill calls.
 - Every "ask the user" becomes a `needs-human` outcome (a question with a recommended answer, or a give-up reason) handed back to the task skill.
 - No dependency on `docs/agents/*`. Cross-references use `factory:` names.
 - Upstream's `agents/openai.yaml` (Codex metadata), where present, is dropped.

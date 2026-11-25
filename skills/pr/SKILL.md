@@ -1,7 +1,6 @@
 ---
 name: pr
-description: Write the PR body for an unattended factory run. Called by a factory task skill as its last step; writes the full body (Summary, Evidence, Merge Danger, Closes #<n>) to the file the task skill names.
-disable-model-invocation: true
+description: Write the PR body for an unattended factory run. Called by a factory task skill as its last step; writes the full body (Summary, Evidence, Merge Danger, Closes #<n>) to the file the task skill names. Use only when a factory task skill (factory:implementer or factory:review) calls for it, never for a general request.
 metadata:
   upstream:
     source: mattpocock-skills
