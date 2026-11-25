@@ -5,8 +5,14 @@ here="$(cd "$(dirname "$0")" && pwd)"
 read_outcome="$here/../implementer/read-outcome"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-echo '{"outcome": "done"}' > "$tmp/done.json"
+echo '{"outcome": "done", "class": "bug-fix"}' > "$tmp/done.json"
 expect_output "done reads as done" "done" "$read_outcome" "$tmp/done.json" "$tmp/c1.md"
+echo '{"outcome": "done"}' > "$tmp/classless.json"
+expect_status "done without a ticket class fails the run" 1 "$read_outcome" "$tmp/classless.json" "$tmp/c7.md"
+echo '{"outcome": "done", "class": "none"}' > "$tmp/noclass.json"
+expect_status "done with class none fails the run" 1 "$read_outcome" "$tmp/noclass.json" "$tmp/c8.md"
+echo '{"outcome": "done", "class": "feature"}' > "$tmp/badclass.json"
+expect_status "done with an unknown class fails the run" 1 "$read_outcome" "$tmp/badclass.json" "$tmp/c9.md"
 
 echo '{"outcome": "needs-human", "comment": "Should the cap be 4 or 5? I recommend 4."}' > "$tmp/nh.json"
 expect_output "needs-human reads as needs-human" "needs-human" "$read_outcome" "$tmp/nh.json" "$tmp/c2.md"

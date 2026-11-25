@@ -16,6 +16,10 @@ _Avoid_: project repo, client repo, downstream repo, consumer repo
 Where a ticket stands in the factory's flow, exactly one at a time: Triage (not yet handed to the factory), Ready (handed to the factory), In progress (a run has claimed it), In review (its PR waits for review), Needs human (handed back on purpose for a human to change something first: an agent's question or give-up, or a run the factory can't start or judge as things stand), Failed (a run broke while working on it), Done.
 _Avoid_: status, stage, column
 
+**Ticket class**:
+What kind of work an implementer run takes a ticket to be: a bug fix, a behaviour change, a refactor, or docs or config. It fixes which factory skills the run uses and what the PR's evidence must show. A ticket that fits no class isn't actionable.
+_Avoid_: ticket type, category, kind
+
 **Review verdict**:
 An automated review's pass or fail on one commit of a PR. A fail sends the ticket back for rework, at most twice in a row before a human steps in.
 _Avoid_: approval, check result, review status

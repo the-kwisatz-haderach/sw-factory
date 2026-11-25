@@ -324,7 +324,7 @@ In order:
      - fits no class → Stop, "not actionable"
    - runs the `## Checks` commands
    - finishes with `factory:pr`, which writes `pr-body.md`
-   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason
+   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason. It also carries the ticket class, the skills called and the unrelated issues noticed, which a deterministic step (`scripts/implementer/run-summary`) writes to the job summary, resolving each skill to the factory commit or the target repo's override that ran
 8. **Deterministic steps act on the outcome.** The agent never touches labels.
    - **`done`:**
      - Check that `pr-body.md` contains `Closes #<n>` and the headings **Summary**, **Evidence** and **Merge Danger**. If anything is missing, the run counts as failed.
@@ -332,7 +332,7 @@ In order:
      - Push, then open or update the PR as `claude[bot]`, ready for review (not draft), titled with the ticket title, with the run link appended.
      - Set `agent:in-review`.
    - **`needs-human`:** post the agent's comment with the run link, and set `agent:needs-human`. No PR.
-   - **No outcome file**, an unreadable one, an unknown outcome, or a `needs-human` without a comment: the run counts as failed.
+   - **No outcome file**, an unreadable one, an unknown outcome, a `done` without a ticket class, or a `needs-human` without a comment: the run counts as failed.
 9. **Always** (`if: always()`): upload the Langfuse trace, the transcript artifact and the job summary ([§11](#11-observability)).
 10. **Chain** after `done` or `needs-human` only ([§10](#10-brakes)).
 

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Usage: run-summary <outcome.json> <factory-dir> <factory-sha> <base-sha>
+# Run from the target repo. Prints the agent's part of the job summary from
+# its outcome file: the ticket class, which version of each skill ran, and
+# the unrelated issues it noticed. <base-sha> is the commit the run started
+# from, whose skills the agent loaded. Prints nothing for a missing outcome
+# file or one that isn't a JSON object; read-outcome judges those.
+set -euo pipefail
+file="$1" factory="$2" sha="$3" base_sha="$4"
+[ -f "$file" ] && jq -e 'type == "object"' "$file" > /dev/null 2>&1 || exit 0
+
+class="$(jq -r '.class // empty' "$file")"
+case "$class" in
+  bug-fix) label="bug fix" ;;
+  behaviour-change) label="behaviour change" ;;
+  refactor) label="refactor" ;;
+  docs-config) label="docs or config" ;;
+  none) label="none (fits no class)" ;;
+  "") label="not recorded" ;;
+  *) label="\`$class\` (unknown)" ;;
+esac
+if [ "$(jq -r '.new_concept // false' "$file")" = "true" ]; then
+  label="$label, with a new or renamed concept"
+  if ! jq -e '[.skills // [] | arrays | .[]] | index("domain-modeling")' "$file" > /dev/null; then
+    label="$label (but \`domain-modeling\` wasn't called)"
+  fi
+fi
+echo "- **Ticket class:** $label"
+
+# A target-repo skill with the exact name replaces the factory skill, so the
+# override is whatever the run started from: the skill at <base-sha>.
+skills="$(jq -r '.skills // [] | arrays | .[] | strings' "$file")"
+if [ -z "$skills" ]; then
+  echo "- **Skills run:** none"
+else
+  echo "- **Skills run:**"
+  while IFS= read -r name; do
+    if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+      echo "  - \`$name\`: not a skill name"
+    elif blob="$(git rev-parse --verify --quiet "$base_sha:.claude/skills/$name/SKILL.md")"; then
+      echo "  - \`$name\`: target repo override (\`.claude/skills/$name/SKILL.md\`, blob ${blob:0:7})"
+    elif [ -f "$factory/skills/$name/SKILL.md" ]; then
+      upstream="$(awk '
+        NR == 1 && $0 == "---" { fm = 1; next }
+        fm && $0 == "---" { exit }
+        fm && /^  upstream:/ { up = 1; next }
+        fm && up && !/^    / { up = 0 }
+        up && $1 == "source:" { src = $2 }
+        up && $1 == "version:" { ver = $2; gsub(/"/, "", ver) }
+        END { if (src && ver) printf ", upstream %s %s", src, ver }
+      ' "$factory/skills/$name/SKILL.md")"
+      echo "  - \`$name\`: factory (\`factory:$name\` at ${sha:0:7}$upstream)"
+    else
+      echo "  - \`$name\`: neither a target repo skill nor a factory skill"
+    fi
+  done <<< "$skills"
+fi
+
+# Noticed, not fixed, and kept out of the PR.
+unrelated="$(jq -r '.unrelated // [] | arrays | .[] | strings | gsub("[\r\n]+"; " ")' "$file")"
+if [ -z "$unrelated" ]; then
+  echo "- **Unrelated issues noticed:** none"
+else
+  echo "- **Unrelated issues noticed:**"
+  while IFS= read -r issue; do echo "  - $issue"; done <<< "$unrelated"
+fi
