@@ -15,7 +15,7 @@ metadata:
 
 TDD is the red → green loop. This skill is the reference that makes that loop produce tests worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the loop. Every section applies on every cycle: consult them before and during the loop, not after.
 
-**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file.
+**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file. The task contract wins over this skill wherever they differ.
 
 When exploring the codebase, read `GLOSSARY.md` (if it exists) so test names and interface vocabulary match the project's domain language, and respect ADRs in the area you're touching.
 
@@ -45,5 +45,5 @@ When the shape of that interface is itself in question (how deep the module is, 
 
 - **Red before green.** Write the failing test first, then only enough code to pass it. Don't anticipate future tests or add speculative features.
 - **One slice at a time.** One seam, one test, one minimal implementation per cycle.
-- **Refactoring is not part of the loop.** It belongs to the review stage (`factory:review`), not the red → green implementation cycle.
+- **Refactoring is not part of the loop.** It belongs to the automated review task (`factory:review`), not the red → green implementation cycle.
 - **Never weaken a test to get green.** Skipping, deleting or loosening an existing test or check is a `needs-human` outcome, not a fix.

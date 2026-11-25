@@ -15,7 +15,7 @@ metadata:
 
 Keep the project's domain model sharp as the change is built: check terms, probe edge cases, and write the glossary and decisions down the moment they crystallise. (Merely *reading* `GLOSSARY.md` for vocabulary is not this skill: that's a one-line habit any skill can do. This skill is for when the change alters the model, not just consumes it.)
 
-**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file. The conversation upstream would have with a person is, here, the **ticket thread**: the ticket body and every comment on it.
+**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file. The task contract wins over this skill wherever they differ. The conversation upstream would have with a person is, here, the **ticket thread**: the ticket body and every comment on it.
 
 ## File structure
 

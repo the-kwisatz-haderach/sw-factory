@@ -15,7 +15,7 @@ metadata:
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file. The bug report is the ticket thread: "the reported symptom" below means the symptom the ticket describes.
+**Unattended.** This skill runs inside a factory run with nobody to ask. Where a person would normally be asked, it ends with a **`needs-human` outcome** instead: stop work and hand the calling task skill a question with your recommended answer, or a give-up reason that says what you tried. The task skill writes the outcome file. The task contract wins over this skill wherever they differ. The bug report is the ticket thread: "the reported symptom" below means the symptom the ticket describes.
 
 When exploring the codebase, read `GLOSSARY.md` (if it exists) to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
 
