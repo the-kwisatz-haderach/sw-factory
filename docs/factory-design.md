@@ -6,6 +6,57 @@ The design of the software factory that builds software across the owner's GitHu
 - **Provenance:** every decision below was made on the wayfinder map [Software factory design](https://github.com/the-kwisatz-haderach/sw-factory/issues/2) and is recorded in full on the ticket linked from its section. This spec gathers those decisions in one place. Where it summarises, the ticket is the authority.
 - **Open items** that must be checked while building are collected in [§13 Verify while building](#13-verify-while-building).
 
+## Overview
+
+How a ticket moves through the factory. Rounded boxes are **ticket states** (the `agent:` labels), and the two outlined groups are the two tasks, each running in the target repo's GitHub Actions. Every run, whatever its outcome, also writes a job summary, a transcript artifact and a Langfuse trace ([§11](#11-observability)). A scheduled board sweep in the factory repo mirrors the labels onto the Projects board ([§9](#9-bookkeeping-jobs)).
+
+```mermaid
+flowchart TD
+    owner([Owner]):::human -- files ticket --> triage(["Triage<br/>no agent: label"])
+    triage -- owner adds agent:ready --> ready(["agent:ready"]):::state
+
+    ready -- "label event · 02:00 UTC backstop<br/>· chaining · rework dispatch" --> cap
+
+    subgraph impl["Implementer run · 45 min"]
+        cap{"Under the daily cap<br/>of 4 runs?"}
+        claim["Pick oldest agent:ready ticket<br/>claim: agent:in-progress"]
+        work["Claude Code + factory plugin<br/>/factory:implementer<br/>classify, skills, ## Checks, factory:pr"]
+        outcome{"Outcome file"}
+        cap -- yes --> claim --> work --> outcome
+    end
+
+    cap -. "no: exit before claiming" .-> ready
+    outcome -- done --> pr["Push agent/issue-n<br/>PR as claude[bot]"]
+    pr --> inreview(["agent:in-review"]):::state
+    outcome -- needs-human --> nh(["agent:needs-human<br/>+ question or reason"]):::state
+    outcome -- "run broke<br/>timeout, crash, no outcome" --> failed(["agent:failed<br/>+ run link"]):::state
+    outcome -. "usage limit: re-queue" .-> ready
+    outcome -. "done or needs-human:<br/>chain if tickets remain" .-> cap
+
+    pr -- "PR opened or pushed" --> review
+    pr -- "PR opened or pushed" --> ci["Target repo PR CI<br/>deterministic gate"]
+
+    subgraph rev["Automated review run · 15 min"]
+        review["Claude Code /factory:review<br/>Standards + Spec axes, cold read"]
+        verdict{"Review verdict<br/>factory/review status"}
+        review --> verdict
+    end
+
+    verdict -- "fail, rounds 1–2:<br/>rework" --> ready
+    verdict -- "fail, 3rd round" --> nh
+    verdict -- pass --> humanreview["Owner reviews the PR"]:::human
+    ci --> humanreview
+
+    humanreview -- merge --> done(["Done: closed"])
+    humanreview -- close unmerged --> nh
+    humanreview -- "comment, re-add agent:ready" --> ready
+    nh -- "owner updates ticket,<br/>re-adds agent:ready" --> ready
+    failed -- "owner re-adds agent:ready" --> ready
+
+    classDef human fill:#fde68a,stroke:#b45309,color:#000
+    classDef state fill:#dbeafe,stroke:#1d4ed8,color:#000
+```
+
 ## Contents
 
 1. [Problem and standing constraints](#1-problem-and-standing-constraints)
