@@ -611,9 +611,9 @@ jobs:
   # board sweep's because GITHUB_TOKEN's label write starts no run, where the
   # sweep's PAT would write as the owner and start a no-op implementer run.
   # No allowlist: closing a PR takes write access, and the hand-back starts
-  # nothing. Only a ticket still open and `agent:in-review` is moved: one a
-  # human or a run has moved on, or closed, is left alone. A merge closes the
-  # ticket itself.
+  # nothing. Only a ticket still open and `agent:in-review` is moved
+  # (scripts/review/handback-skip): one a human or a run has moved on, or
+  # closed, is left alone. A merge closes the ticket itself.
   handback:
     if: >-
       github.event_name == 'pull_request'
@@ -645,23 +645,20 @@ jobs:
       - name: Hand the ticket back to the owner
         run: |
           set -o pipefail
+          factory=.factory-plugin
+          # Each early end, said in the log and the job summary.
+          end_with() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
           if ! ticket="$(jq '.pull_request' "$GITHUB_EVENT_PATH" \
-              | .factory-plugin/scripts/review/handback-ticket "$GH_REPO")"; then
+              | "$factory/scripts/review/handback-ticket" "$GH_REPO")"; then
             echo "::error::PR #$PR_NUMBER could not be read from the event, or neither its body nor its branch names a ticket."
             exit 1
           fi
-          if [ -z "$ticket" ]; then
-            echo "PR #$PR_NUMBER is merged or not an agent PR of this repo; nothing to hand back." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          # Captured first: a failure inside `read <<<` would be masked.
-          issue="$(gh issue view "$ticket" --json state,labels \
-            --jq '"\(.state) \([.labels[].name] | join(","))"')"
-          read -r state labels <<< "$issue"
-          if [ "$state" != "OPEN" ] || [[ ",$labels," != *",agent:in-review,"* ]]; then
-            echo "Ticket #$ticket is not open and \`agent:in-review\` ($state, $labels); left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          [ -n "$ticket" ] || end_with "PR #$PR_NUMBER is merged or not an agent PR of this repo; nothing to hand back."
+          gh issue view "$ticket" --json number,state,labels > "$RUNNER_TEMP/ticket.json"
+          # Captured first, so a ticket that couldn't be read fails the step
+          # rather than reading as "go on".
+          reason="$("$factory/scripts/review/handback-skip" "$RUNNER_TEMP/ticket.json")"
+          [ -z "$reason" ] || end_with "$reason"
           gh issue comment "$ticket" --body-file - <<EOF
           PR #$PR_NUMBER was closed without merging, so the ticket comes back to you.
 

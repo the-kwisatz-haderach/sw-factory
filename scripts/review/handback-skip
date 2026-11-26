@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Usage: handback-skip <ticket.json>
+# Decides whether handback (§5 Ticket ↔ PR) leaves a closed agent PR's ticket
+# alone. <ticket.json> is the ticket as `gh issue view --json
+# number,state,labels` prints it. Prints the reason to leave it, or nothing if
+# it is handed back: the ticket is open and still `agent:in-review`. Exits 1
+# if the file isn't a ticket, so an API error never reads as a reason to skip.
+set -euo pipefail
+ticket="$1"
+jq -r '
+  if (.state | type) != "string" or (.labels | type) != "array"
+  then error("not a ticket") else . end
+  | [.labels[].name] as $labels
+  | if .state != "OPEN" then "Ticket #\(.number) is \(.state); left as it is."
+    elif ($labels | any(. == "agent:in-review") | not) then
+      "Ticket #\(.number) is not `agent:in-review` (\($labels | join(","))); left as it is."
+    else empty end' "$ticket" 2>/dev/null || exit 1
