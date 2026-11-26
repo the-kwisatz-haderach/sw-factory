@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: jq .pull_request "$GITHUB_EVENT_PATH" | handback-ticket <owner/repo>
+# Reads a closed PR (a pull_request event's `pull_request`) and prints the
+# ticket to hand back to the owner (§5 Ticket ↔ PR): the one an agent PR
+# builds (scripts/review/ticket-of), when the PR closed unmerged. Prints
+# nothing for a merged PR or a PR that isn't from an `agent/issue-*` branch of
+# <owner/repo> itself. Exits 1 if the input isn't a PR, or an agent PR names
+# no ticket.
+set -euo pipefail
+repo="$1"
+here="$(cd "$(dirname "$0")" && pwd)"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+cat > "$tmp/pr.json"
+jq -e '(.merged | type) == "boolean" and (.head.ref | type) == "string"' \
+  "$tmp/pr.json" > /dev/null 2>&1 || exit 1
+agent_unmerged="$(jq -r --arg repo "$repo" '
+  .merged == false
+  and (.head.ref | startswith("agent/issue-"))
+  and .head.repo.full_name == $repo' "$tmp/pr.json")"
+[ "$agent_unmerged" = "true" ] || exit 0
+jq -r '.body // ""' "$tmp/pr.json" > "$tmp/body.md"
+"$here/ticket-of" "$tmp/body.md" "$(jq -r '.head.ref' "$tmp/pr.json")"

@@ -25,6 +25,9 @@
 # per PR with the `pr` input, so each backstop review is a run of its own,
 # shaped like a push's, with its own verdict or `error`.
 #
+# An agent PR closed without merging hands its ticket back: `agent:in-review`
+# goes to `agent:needs-human`, with a comment (§5 Ticket ↔ PR).
+#
 # The review never pushes code and never runs checks: the target repo's PR CI
 # is the deterministic gate, and runs alongside this without being read. The
 # split keeps it that way by permission, not by instruction: the job the agent
@@ -136,11 +139,12 @@ jobs:
     # cancel-in-progress says, so a backstop dispatch does replace a pending
     # push review; it then reviews that same current head, and its verdict
     # replaces the replaced run's `error`. The group is the review's own, so reviews never cancel or
-    # get cancelled by implementer runs. Any other event gets a group of its
-    # own run.
+    # get cancelled by implementer runs. Any other event, a PR close among
+    # them (handback's), gets a group of its own run, so it can't cancel a
+    # review whether or not a skipped job takes its group (§13 item 15).
     concurrency:
       group: >-
-        review-${{ github.event.pull_request.number
+        review-${{ (github.event.action != 'closed' && github.event.pull_request.number)
           || (!github.event.inputs.ticket && github.event.inputs.pr)
           || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -598,6 +602,73 @@ jobs:
           fi
           echo "Rework round $count of $REWORK_CAP: ticket #$TICKET is \`agent:ready\` again and \`$stub\` dispatched." \
             | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # An agent PR closed without merging hands its ticket back to the owner (§5
+  # Ticket ↔ PR, §13 item 13): `agent:in-review` → `agent:needs-human`, with a
+  # comment. No agent runs here. It lives in the stub's path rather than the
+  # board sweep's because GITHUB_TOKEN's label write starts no run, where the
+  # sweep's PAT would write as the owner and start a no-op implementer run.
+  # No allowlist: closing a PR takes write access, and the hand-back starts
+  # nothing. Only a ticket still open and `agent:in-review` is moved: one a
+  # human or a run has moved on, or closed, is left alone. A merge closes the
+  # ticket itself.
+  handback:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.action == 'closed'
+      && !github.event.pull_request.merged
+      && startsWith(github.event.pull_request.head.ref, 'agent/issue-')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
+      - name: Hand the ticket back to the owner
+        run: |
+          set -o pipefail
+          if ! ticket="$(jq '.pull_request' "$GITHUB_EVENT_PATH" \
+              | .factory-plugin/scripts/review/handback-ticket "$GH_REPO")"; then
+            echo "::error::PR #$PR_NUMBER could not be read from the event, or neither its body nor its branch names a ticket."
+            exit 1
+          fi
+          if [ -z "$ticket" ]; then
+            echo "PR #$PR_NUMBER is merged or not an agent PR of this repo; nothing to hand back." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Captured first: a failure inside `read <<<` would be masked.
+          issue="$(gh issue view "$ticket" --json state,labels \
+            --jq '"\(.state) \([.labels[].name] | join(","))"')"
+          read -r state labels <<< "$issue"
+          if [ "$state" != "OPEN" ] || [[ ",$labels," != *",agent:in-review,"* ]]; then
+            echo "Ticket #$ticket is not open and \`agent:in-review\` ($state, $labels); left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh issue comment "$ticket" --body-file - <<EOF
+          PR #$PR_NUMBER was closed without merging, so the ticket comes back to you.
+
+          Re-add \`agent:ready\` for a fresh attempt from the default branch, or close the ticket.
+
+          Run: $RUN_URL
+          EOF
+          gh issue edit "$ticket" --remove-label agent:in-review --add-label agent:needs-human
+          echo "PR #$PR_NUMBER closed unmerged; ticket #$ticket handed to a human." | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Anything that breaks the run (a failed step or job, a malformed outcome
   # file, a timeout, a cancel) sets `factory/review` to `error` with the run

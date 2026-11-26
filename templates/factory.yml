@@ -8,8 +8,9 @@ name: factory
 on:
   issues:
     types: [labeled]
+  # Opens and pushes start a review; an unmerged close hands the ticket back.
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, closed]
   # Chaining (no inputs), review's backstop (pr only) and rework after a
   # failed review (all three).
   workflow_dispatch:
