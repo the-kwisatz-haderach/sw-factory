@@ -247,15 +247,25 @@ jobs:
           # commits would be attributed to it. 209825114 is claude[bot]'s.
           bot_id: "209825114"
           bot_name: "claude[bot]"
+          # A chained run is started by this workflow's GITHUB_TOKEN, so its
+          # actor is github-actions[bot], and the action refuses bot actors it
+          # isn't told about (run 45790968361 on the test target repo).
+          allowed_bots: "github-actions[bot]"
           prompt: |
             /factory:implementer
             Ticket: #${{ env.TICKET }}
             Run directory: ${{ env.RUN_DIR }}/
             ${{ env.PR_NUMBER != '' && format('Open PR: #{0}', env.PR_NUMBER) || 'Open PR: none' }}
+          # allowed_bots turns off the action's default auto permission mode
+          # (§13 item 14), so the tools the work needs are allowed here: the
+          # file tools, skills and sub-agents, and all of Bash, since the
+          # `## Checks` commands are the target repo's own. The agent still
+          # holds no token it could push or post with.
           claude_args: >-
             --plugin-dir ${{ runner.temp }}/factory
             --add-dir ${{ runner.temp }}/factory
             --append-system-prompt-file ${{ runner.temp }}/factory/system.md
+            --allowedTools "Read,Glob,Grep,Edit,MultiEdit,Write,NotebookEdit,Bash,Skill,Agent,Task,TodoWrite"
 
       # Read before anything else can fail, so report-failure can tell an
       # expired or revoked Claude token from any other breakage.
