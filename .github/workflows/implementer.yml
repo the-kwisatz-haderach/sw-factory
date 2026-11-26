@@ -171,8 +171,8 @@ jobs:
           # Nothing else runs for this ticket.
           echo "TICKET=" >> "$GITHUB_ENV"
 
-      # The step's name is a contract: scripts/implementer/runs-today counts
-      # today's runs by it.
+      # The step's name and the job's id are a contract: runs-today counts
+      # today's runs by them (scripts/test/runs-today-contract.test.sh).
       - name: Claim the ticket
         if: env.TICKET != ''
         env:

@@ -9,7 +9,8 @@
 # job called from the stub is named "<stub job> / implement". A run counts once
 # its "Claim the ticket" step succeeded that day, so a run that found nothing
 # to do, handed the ticket back at pre-flight or stopped at the cap costs
-# nothing against it. Both names are .github/workflows/implementer.yml's.
+# nothing against it. Both names are .github/workflows/implementer.yml's;
+# scripts/test/runs-today-contract.test.sh keeps the workflow to them.
 set -euo pipefail
 day="$1"
 jq --arg day "$day" '
