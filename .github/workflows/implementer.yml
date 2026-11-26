@@ -1,8 +1,9 @@
 # The implementer task (docs/factory-design.md §7), called by a target repo's
 # stub. Everything here runs in the target repo: its minutes, logs and secrets.
 #
-# An allowlisted actor adds `agent:ready`, the run claims the oldest ready
-# ticket, the agent builds it with the factory plugin, and on outcome `done`
+# An allowlisted actor adds `agent:ready`, the daily backstop fires at 02:00
+# UTC, or the previous run chains on; the run claims the oldest ready ticket,
+# the agent builds it with the factory plugin, and on outcome `done`
 # the branch is pushed and the PR opened as `claude[bot]`. If the ticket's
 # branch already has an open PR, the run continues that PR instead: new
 # commits on its branch, no force-push, the body rewritten. Without one, a
@@ -14,6 +15,10 @@
 #   or a branch that changes the `## Checks` section → `agent:needs-human`
 # - anything that breaks the run (a failed step, a missing or malformed
 #   outcome file, a timeout, a cancel) → `agent:failed`, by `report-failure`
+#
+# Brakes (docs/factory-design.md §10): one run in flight per repo and at most
+# one pending; at most DAILY_CAP runs claim a ticket per UTC day; and a run
+# that ends in `done` or `needs-human` chains to the next ready ticket.
 name: implementer
 
 on:
@@ -34,16 +39,39 @@ on:
 
 jobs:
   implement:
+    # Three triggers (§7.1): an allowlisted human adds `agent:ready`; the daily
+    # backstop; or chaining, a dispatch with no ticket fired by the previous
+    # run with this workflow's GITHUB_TOKEN, so by github-actions[bot]. A
+    # dispatch with a ticket is rework, not handled here.
     if: >-
-      github.event_name == 'issues'
-      && github.event.action == 'labeled'
-      && github.event.label.name == 'agent:ready'
-      && !github.event.issue.pull_request
-      && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
-      && !endsWith(github.triggering_actor, '[bot]')
+      (github.event_name == 'issues'
+        && github.event.action == 'labeled'
+        && github.event.label.name == 'agent:ready'
+        && !github.event.issue.pull_request
+        && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
+        && !endsWith(github.triggering_actor, '[bot]'))
+      || github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch'
+        && !github.event.inputs.ticket
+        && github.triggering_actor == 'github-actions[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # One run in flight per repo and at most one pending: a newer pending run
+    # replaces the older, which strands nothing, since every run takes the
+    # oldest ready ticket (§7.5). Only the events that can pass the `if` share
+    # the group, so a skipped stub job (a PR push, another label, rework) can
+    # never take the pending slot from a real run. The actor checks are left
+    # out: an `agent:ready` from someone off the allowlist can still take it.
+    concurrency:
+      group: >-
+        ${{ ((github.event_name == 'issues' && github.event.label.name == 'agent:ready' && !github.event.issue.pull_request)
+          || github.event_name == 'schedule'
+          || (github.event_name == 'workflow_dispatch' && !github.event.inputs.ticket))
+          && 'factory-implementer' || format('factory-implementer-{0}', github.run_id) }}
+      cancel-in-progress: false
     permissions:
+      # Write to fire the chained dispatch; read to count today's runs.
+      actions: write
       contents: write
       issues: write
       pull-requests: write
@@ -57,8 +85,11 @@ jobs:
       # token it could use to touch labels. Each bookkeeping step sets its own.
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      # A schedule event carries no repository, but runs on the default branch.
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
       RUN_DIR: .factory-run
+      # Runs that claim a ticket per repo per UTC day, every kind counted (§10).
+      DAILY_CAP: 4
     steps:
       # The plugin comes from the exact commit of this running workflow, so the
       # instructions and the workflow can never skew. It is moved out of the
@@ -76,8 +107,36 @@ jobs:
           mv .factory-plugin "$RUNNER_TEMP/factory"
           echo "FACTORY=$RUNNER_TEMP/factory" >> "$GITHUB_ENV"
 
+      # Before the pick, so a run at the cap claims nothing. Runs are counted
+      # by their claim step, from the jobs of every stub run that could have
+      # been an implementer run since yesterday (a run created before midnight
+      # can claim after it; runs-today keeps today's claims). If the count
+      # can't be read the step fails: no run goes ahead uncapped.
+      - name: Check the daily cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          today="$(date -u +%F)"
+          since="$(date -u -d yesterday +%F)"
+          gh api --paginate --slurp "repos/$GH_REPO/actions/runs?created=%3E%3D$since&per_page=100" \
+            | jq -r '.[].workflow_runs[] | select(.event == "issues" or .event == "schedule" or .event == "workflow_dispatch") | .id' \
+            > "$RUNNER_TEMP/runs.txt"
+          while read -r id; do
+            gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$id/jobs?filter=all&per_page=100" \
+              | jq '[.[].jobs[]]' || exit 1
+          done < "$RUNNER_TEMP/runs.txt" | jq -s 'add // []' > "$RUNNER_TEMP/jobs.json"
+          runs="$("$FACTORY/scripts/implementer/runs-today" "$today" < "$RUNNER_TEMP/jobs.json")"
+          echo "RUNS_TODAY=$runs" >> "$GITHUB_ENV"
+          if [ "$runs" -ge "$DAILY_CAP" ]; then
+            echo "Daily cap: $runs of $DAILY_CAP implementer runs already claimed a ticket today (UTC); nothing claimed. The next backstop picks the queue up." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "AT_CAP=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Pick the oldest ready ticket
         id: pick
+        if: env.AT_CAP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -112,6 +171,8 @@ jobs:
           # Nothing else runs for this ticket.
           echo "TICKET=" >> "$GITHUB_ENV"
 
+      # The step's name is a contract: scripts/implementer/runs-today counts
+      # today's runs by it.
       - name: Claim the ticket
         if: env.TICKET != ''
         env:
@@ -337,6 +398,43 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:in-review
 
+      # Chaining (§10): the queue drains without a human re-triggering it, but
+      # only after a run that ended as the agent meant it to, and only while
+      # the cap leaves room for this run and the next (should-chain decides). A failed, cancelled or
+      # usage-limited run never gets here: every step above must succeed. A
+      # dispatch fired with GITHUB_TOKEN starts a run, unlike its label writes
+      # (§13 item 6). The dispatch goes to the stub that started this run. A
+      # failure here doesn't fail the run: the ticket's work is done, and the
+      # next backstop picks the queue up.
+      - name: Chain to the next ready ticket
+        id: chain
+        if: >-
+          steps.outcome.outputs.route == 'done'
+          || steps.outcome.outputs.route == 'needs-human'
+          || steps.outcome.outputs.route == 'checks-changed'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUTE: ${{ steps.outcome.outputs.route }}
+          STUB_REF: ${{ github.workflow_ref }}
+        run: |
+          set -o pipefail
+          echo "CHAINED=no: the chain step broke" >> "$GITHUB_ENV"
+          next="$(gh api --paginate --slurp "repos/$GH_REPO/issues?labels=agent%3Aready&state=open&per_page=100" \
+            | jq 'add // []' | "$FACTORY/scripts/implementer/pick-ticket")"
+          if ! decision="$("$FACTORY/scripts/implementer/should-chain" "$ROUTE" "$RUNS_TODAY" "$DAILY_CAP" "$next")"; then
+            echo "CHAINED=$decision" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # STUB_REF is "<owner>/<repo>/.github/workflows/<file>@<ref>".
+          stub="${STUB_REF%%@*}"
+          stub="${stub##*/}"
+          if ! gh api -X POST "repos/$GH_REPO/actions/workflows/$stub/dispatches" -f ref="$DEFAULT_BRANCH"; then
+            echo "CHAINED=no: the dispatch failed" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          echo "CHAINED=$decision; \`$stub\` dispatched on \`$DEFAULT_BRANCH\`" >> "$GITHUB_ENV"
+
       # The last two steps leave a record of every run that claimed a ticket,
       # however it ended (docs/factory-design.md §11). They run after a failed,
       # timed-out or cancelled agent step: its timeout is shorter than the
@@ -385,6 +483,8 @@ jobs:
             echo "- **Ticket:** #$TICKET"
             echo "- **PR:** $pr"
             echo "- **Outcome:** $outcome"
+            echo "- **Runs today:** $((${RUNS_TODAY:-0} + 1)) of $DAILY_CAP, this one included"
+            echo "- **Chained:** ${CHAINED:-no: the run did not end in \`done\` or \`needs-human\`, or broke after}"
             "$FACTORY/scripts/run-figures" "$EXECUTION_FILE" \
               || echo "- **Turns, tokens and cost:** could not be read"
             "$FACTORY/scripts/run-summary" implementer "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "${BASE_SHA:-HEAD}" "$EXECUTION_FILE" \

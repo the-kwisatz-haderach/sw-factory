@@ -307,7 +307,7 @@ Each triggered or chained run takes the **oldest `agent:ready` ticket** in the r
 
 In order:
 
-1. **Daily cap:** if this repo has already had 4 implementer runs today (UTC), exit **before claiming**, with a job-summary note ([§10](#10-brakes)).
+1. **Daily cap:** if this repo has already had 4 implementer runs today (UTC), exit **before claiming**, with a job-summary note ([§10](#10-brakes)). A run counts once it has claimed a ticket (`scripts/implementer/runs-today`), so a run that finds nothing to do, hands back at pre-flight or stops at the cap costs nothing against it.
 2. **Pick** the ticket. If no ticket has `agent:ready`, exit.
 3. **Pre-flight:** without `CLAUDE.md` `## Checks` on the default branch, set `agent:needs-human` with a comment before any tokens are spent.
 4. **Claim:** swap `agent:ready` → `agent:in-progress` (`GITHUB_TOKEN`).
@@ -336,7 +336,7 @@ In order:
    - **`needs-human`:** post the agent's comment with the run link, and set `agent:needs-human`. No PR.
    - **No outcome file**, an unreadable one, an unknown outcome, a `done` without a ticket class, or a `needs-human` without a comment: the run counts as failed.
 9. **Always** (`if: always()`, once a ticket is claimed): upload the Langfuse trace and the transcript artifact, then write the job summary ([§11](#11-observability)). These run after a failed, timed-out or cancelled agent step, because the agent step's timeout (40 min) is shorter than the job's (45 min); see [§13](#13-verify-while-building) item 16 for the limit of that margin. A run that broke reads as outcome `failed` there.
-10. **Chain** after `done` or `needs-human` only ([§10](#10-brakes)).
+10. **Chain** after `done` or `needs-human` only ([§10](#10-brakes)), including a hand-back for a changed `## Checks` section but not a pre-flight hand-back, which spent no tokens and claimed nothing. The run fires `workflow_dispatch` on the stub that started it, with no inputs (`scripts/implementer/should-chain` decides). A failed dispatch doesn't fail the run; the backstop picks the queue up. The job summary records the day's run count and whether the run chained.
 
 **Stop** (outcome `needs-human`, no PR) when:
 
@@ -478,7 +478,7 @@ Decided in [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19), 
 | Human review | the owner reviews and merges every PR; no auto-merge |
 | Backstop | daily, 02:00 UTC: implementer pickup plus re-review of unruled SHAs |
 | Chaining | after `done` or `needs-human` only, and only if an `agent:ready` ticket remains and the cap isn't hit; never after a failed, cancelled or usage-limited run |
-| Daily cap | **4 implementer runs per target repo per UTC day**, counting every kind of run, one constant in the reusable workflow; at the cap, exit before claiming |
+| Daily cap | **4 implementer runs per target repo per UTC day**, counting every kind of run that claimed a ticket, one constant (`DAILY_CAP`) in the reusable workflow; at the cap, exit before claiming |
 | Rework cap | 2 automatic rounds, then `agent:needs-human` |
 | Timeouts | implementer job **45** min (Claude step 40); review job **15** min (Claude step 12); bookkeeping and follow-up jobs **5** min; no `--max-turns` |
 | Retry of `agent:failed` | **none automatic**; the owner re-adds `agent:ready` |
@@ -590,9 +590,9 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 3 | The nested factory checkout loads no duplicate skills | check the target out into a sibling directory | [#17](https://github.com/the-kwisatz-haderach/sw-factory/issues/17) |
 | 4 | A follow-up job with `if: failure() \|\| cancelled()` runs after a timed-out or cancelled agent job, and still reads that job's outputs (the ticket number is set as the pick step's output). **Answered for a cancel ([#24](https://github.com/the-kwisatz-haderach/sw-factory/issues/24)):** after a manual cancel during the agent step (run 45626632283 on the test target repo), `report-failure` ran, read the ticket from the cancelled job's outputs, and set `agent:failed`. A timeout is still untried. | (none given; it's the reason for the separate job) | [#10](https://github.com/the-kwisatz-haderach/sw-factory/issues/10) |
 | 5 | `claude[bot]` pushes and PRs trigger the target repo's CI and the stub's review job | (none given; the design depends on it) | [#5](https://github.com/the-kwisatz-haderach/sw-factory/issues/5) |
-| 6 | A `workflow_dispatch` fired with `GITHUB_TOKEN` (`actions: write`) starts a run, for both rework and chaining | (none given; the design depends on it) | [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11), [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
+| 6 | A `workflow_dispatch` fired with `GITHUB_TOKEN` (`actions: write`) starts a run, for both rework and chaining. GitHub documents `workflow_dispatch` and `repository_dispatch` as the exceptions to "`GITHUB_TOKEN` events start no runs"; chaining ([#28](https://github.com/the-kwisatz-haderach/sw-factory/issues/28)) relies on it, and the first chained run on the test target repo is still to confirm it. | (none given; the design depends on it) | [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11), [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 7 | The exact shape of `rate_limit` and `authentication_failed` in `execution_file`. **`authentication_failed` answered ([#24](https://github.com/the-kwisatz-haderach/sw-factory/issues/24)):** the execution file is a JSON array of SDK messages, and a rejected token shows up as `"error": "authentication_failed"` on a message object. `scripts/implementer/auth-failed` matches that field at any depth; a run with a junk token (run 45628504418 on the test target repo) got the "rotate the Claude token" comment. `rate_limit` is still open. | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
-| 8 | Counting today's implementer runs via the API when both tasks share the stub workflow (count **jobs by name**, not workflow runs) | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
+| 8 | Counting today's implementer runs via the API when both tasks share the stub workflow (count **jobs by name**, not workflow runs). **Built ([#28](https://github.com/the-kwisatz-haderach/sw-factory/issues/28)):** the cap step lists the stub's `issues`, `schedule` and `workflow_dispatch` runs since yesterday, fetches each run's jobs, and `scripts/implementer/runs-today` counts the jobs named `<stub job> / implement` whose `Claim the ticket` step succeeded today. Assumes the jobs API names a called job `<caller> / <job>`; untried on a live run. | — | [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19) |
 | 9 | Langfuse Hobby over the 50k-unit cap rejects data rather than billing | — | [#16](https://github.com/the-kwisatz-haderach/sw-factory/issues/16) |
 | 10 | `gh search repos --topic` returns private repos under the sweep's classic PAT. **Answered: yes ([#38](https://github.com/the-kwisatz-haderach/sw-factory/issues/38)):** the first PAT sweep ([run 45600641172](https://github.com/the-kwisatz-haderach/sw-factory/actions/runs/45600641172)) found the private target repo. | — | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 11 | Adding a repo to the Claude App installation can't be scripted with the owner's token (assumed, hence the printed link) | if it can, script it | [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |

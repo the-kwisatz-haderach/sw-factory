@@ -8,6 +8,21 @@ on:
     types: [labeled]
   pull_request:
     types: [opened, synchronize]
+  # Chaining (no inputs) and, once it exists, rework (all three).
+  workflow_dispatch:
+    inputs:
+      ticket:
+        type: string
+        required: false
+      pr:
+        type: string
+        required: false
+      round:
+        type: string
+        required: false
+  # The daily backstop: the implementer picks up the oldest ready ticket.
+  schedule:
+    - cron: "0 2 * * *"
 
 jobs:
   implementer:

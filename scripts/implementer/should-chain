@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Usage: should-chain <route> <runs-today> <daily-cap> <next-ticket>
+# Decides whether a finished implementer run chains to the next one
+# (docs/factory-design.md §10). <route> is the outcome step's route,
+# <runs-today> the runs that claimed a ticket today before this one, and
+# <next-ticket> the oldest ready ticket left, empty for none. Chains (exit 0)
+# only after a run the agent ended on purpose (`done`, `needs-human`, or the
+# `needs-human` hand-back for a changed `## Checks` section), while the cap
+# leaves room for the next run as well as this one, and while a ticket waits.
+# Otherwise exits 1. Prints the reason either way, for the job summary.
+set -euo pipefail
+route="$1" runs="$2" cap="$3" next="$4"
+case "$route" in
+  done|needs-human|checks-changed) ;;
+  *) echo "no: the run did not end in \`done\` or \`needs-human\`"; exit 1 ;;
+esac
+if [ "$((runs + 1))" -ge "$cap" ]; then
+  echo "no: this run reached the daily cap of $cap"
+  exit 1
+fi
+if [ -z "$next" ]; then
+  echo "no: no \`agent:ready\` ticket remains"
+  exit 1
+fi
+echo "yes: #$next is the oldest ready ticket"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: runs-today <YYYY-MM-DD> < jobs.json
+# Reads the jobs of the stub's recent runs on stdin (the `jobs` arrays of
+# GET /repos/{owner}/{repo}/actions/runs/{id}/jobs, joined into one array) and
+# prints how many implementer runs claimed a ticket on that UTC day: the count
+# the daily cap is held to (docs/factory-design.md §10).
+#
+# Jobs are told apart by name, since one stub runs both tasks (§13 item 8): a
+# job called from the stub is named "<stub job> / implement". A run counts once
+# its "Claim the ticket" step succeeded that day, so a run that found nothing
+# to do, handed the ticket back at pre-flight or stopped at the cap costs
+# nothing against it. Both names are .github/workflows/implementer.yml's.
+set -euo pipefail
+day="$1"
+jq --arg day "$day" '
+  [ .[]
+    | select(.name | test("(^|/ )implement$"))
+    | .steps[]?
+    | select(.name == "Claim the ticket"
+             and .conclusion == "success"
+             and (.started_at // "" | startswith($day))) ]
+  | length'
