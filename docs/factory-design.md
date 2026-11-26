@@ -326,7 +326,7 @@ In order:
      - fits no class → Stop, "not actionable"
    - runs the `## Checks` commands
    - finishes with `factory:pr`, which writes `pr-body.md`
-   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason. It also carries the ticket class, the skills called and the unrelated issues noticed, which a deterministic step (`scripts/implementer/run-summary`) writes to the job summary. The skills listed are the Skill tool calls in the transcript (`execution_file`), each resolved to the factory commit or the target repo's override that ran; an agent list that differs is flagged, and the agent's own list is used only when the transcript can't be read
+   - writes the **outcome file**: `done`, or `needs-human` with a question or give-up reason. It also carries the ticket class, the skills called and the unrelated issues noticed, which the job summary step (`scripts/run-summary`) writes to the job summary. The skills listed are the Skill tool calls in the transcript (`execution_file`), each resolved to the factory commit or the target repo's override that ran; an agent list that differs is flagged, and the agent's own list is used only when the transcript can't be read
 8. **Deterministic steps act on the outcome.** The agent never touches labels.
    - **`done`:**
      - Check that `pr-body.md` contains `Closes #<n>` and the headings **Summary**, **Evidence** and **Merge Danger**. If anything is missing, the run counts as failed.
@@ -335,7 +335,7 @@ In order:
      - Set `agent:in-review`.
    - **`needs-human`:** post the agent's comment with the run link, and set `agent:needs-human`. No PR.
    - **No outcome file**, an unreadable one, an unknown outcome, a `done` without a ticket class, or a `needs-human` without a comment: the run counts as failed.
-9. **Always** (`if: always()`): upload the Langfuse trace, the transcript artifact and the job summary ([§11](#11-observability)).
+9. **Always** (`if: always()`, once a ticket is claimed): upload the Langfuse trace and the transcript artifact, then write the job summary ([§11](#11-observability)). These run after a failed, timed-out or cancelled agent step, because the agent step's timeout (40 min) is shorter than the job's (45 min); see [§13](#13-verify-while-building) item 16 for the limit of that margin. A run that broke reads as outcome `failed` there.
 10. **Chain** after `done` or `needs-human` only ([§10](#10-brakes)).
 
 **Stop** (outcome `needs-human`, no PR) when:
@@ -427,6 +427,7 @@ Decided in [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11) a
   - The agent writes an outcome file, `pass` or `fail`.
   - A deterministic step sets the commit status **`factory/review`** (`success`/`failure`) on the head SHA with `GITHUB_TOKEN`, linking to the review.
   - The job succeeds either way, so a red job only ever means the run broke.
+- **Always** (`if: always()`, once the head SHA is to be reviewed): upload the transcript artifact, then write the job summary ([§11](#11-observability)), after a failed agent step too (agent step 12 min, job 15 min; [§13](#13-verify-while-building) item 16). The summary shows the review verdict the post job will set, or `failed`.
 
 ### 3. What does it trigger next?
 
@@ -524,16 +525,15 @@ Decided in [#16](https://github.com/the-kwisatz-haderach/sw-factory/issues/16).
   - Rejected: native OTel (beta, about twice the volume, sessions can't be grouped by ticket) and Langfuse's Stop hook (relies on SDK internals).
 - **On GitHub, every run also gets:**
   - The `execution_file` as a **run artifact**, `if: always()`, `retention-days: 14`, `continue-on-error`. A missing file is tolerated.
-  - A **job summary** written by a deterministic step:
+  - A **job summary** written by a deterministic step, the job's last ([#34](https://github.com/the-kwisatz-haderach/sw-factory/issues/34)):
     - ticket and PR
-    - outcome
-    - turns and duration
-    - token and cost figures
+    - outcome: `done`, `needs-human` or `failed` for the implementer; the review verdict or `failed` for a review
+    - turns and duration, token and cost figures: the result message in the `execution_file` (`scripts/run-figures`). A run cut short before its result says so.
     - the ticket class (implementer)
     - unrelated issues noticed (implementer)
-    - which version of each factory skill ran
+    - which version of each factory skill ran (`scripts/run-summary`), from the transcript's Skill calls
     - artifact pointer
-    - the Langfuse units this run used
+    - the Langfuse units this run used (once the Langfuse upload exists)
 - **Retro is manual**, in the Langfuse UI.
 - There's no cross-repo run view beyond the board and Langfuse. For a run's detail, go to the target repo's Actions tab.
 
@@ -600,6 +600,7 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 13 | **Where unmerged-PR-close handling runs.** [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) gives it to the board sweep; [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) subscribes the stub to `pull_request: closed`. The stub path writes the label with `GITHUB_TOKEN` at once and starts no run; a label written by the sweep's PAT would show up as the owner's and start a no-op implementer run. Recommended: the stub path. | the sweep, as in [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) | reconciliation of [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) and [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 14 | The review agent step runs on the job's read-only `GITHUB_TOKEN` (`github_token` input, no `id-token`) for a `claude[bot]`-triggered PR run, with `allowed_bots: "claude[bot]"`. **Token answered ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)):** the action accepted the read-only token and passed the actor check on the first review run (run 45660737541 on the test target repo). That run also showed two things: setting `allowed_bots` turns off the action's default auto permission mode, so the review needs an explicit `--allowedTools` (without it, `Write` and `git` were denied and no outcome file was written); and the action never trusts a bot-authored PR, so `restrict_untrusted_prs` denies interpreters and shells, which the review doesn't need. | give the review job `id-token: write` and rely on `--disallowedTools` alone to keep the agent from pushing | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
 | 15 | A review job skipped by its `if` (another actor's push, a non-agent branch) doesn't take the `review-<pr>` group and cancel a running review. Also accepted: a re-run for an older SHA cancels the head's review, which then waits for the backstop ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)) | move the gate into the stub's job `if` | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
+| 16 | The `always()` transcript upload and job summary run after an agent step that hit its own `timeout-minutes` ([#34](https://github.com/the-kwisatz-haderach/sw-factory/issues/34)). A step's timeout counts from the step's start and the job's from the job's, so the margin is the job timeout minus the agent timeout minus the time the steps before the agent took: 5 min for the implementer (checkout, the target's `factory-setup`, branch prep), 3 min for review. A slower setup lets the job timeout fire first, skipping both steps; `report-failure` still marks the ticket. Untried. | widen the job timeout, or calibrate with the other timeouts | [#34](https://github.com/the-kwisatz-haderach/sw-factory/issues/34) |
 
 **Calibrate after the first week of traced runs:**
 

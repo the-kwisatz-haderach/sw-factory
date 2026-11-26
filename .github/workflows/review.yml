@@ -100,7 +100,6 @@ jobs:
           fi
           echo "REVIEW=true" >> "$GITHUB_ENV"
           echo "reviewed=true" >> "$GITHUB_OUTPUT"
-          echo "PR: #$PR_NUMBER at $HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
 
       # Full history, for the merge-base. No persisted credentials.
       - name: Check out the PR head
@@ -137,7 +136,6 @@ jobs:
             exit 1
           fi
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
-          echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
           gh issue view "$ticket" --json number,title,body,comments \
             | "$FACTORY/scripts/ticket-thread" > "$RUN_DIR/ticket.md"
 
@@ -182,8 +180,11 @@ jobs:
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
 
       # The transcript, for seeing what the agent did and what it was denied
-      # (docs/factory-design.md §11). A missing file is tolerated.
+      # (docs/factory-design.md §11). A missing file is tolerated. It and the
+      # job summary run after a failed, timed-out or cancelled agent step: its
+      # timeout is shorter than the job's, so they still get time.
       - name: Upload the transcript
+        id: transcript
         if: always() && steps.claude.outcome != 'skipped'
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -205,6 +206,44 @@ jobs:
           name: review-verdict-${{ github.run_attempt }}
           path: ${{ runner.temp }}/verdict/
           retention-days: 1
+
+      # Deterministic, from what the steps above recorded. The verdict shown is
+      # the one the post job will post; a missing or malformed outcome file
+      # reads as `failed`, as the post job will judge it. The skills come from
+      # the transcript's Skill calls, resolved against the base branch's
+      # `.claude/`, which is what the agent loaded.
+      - name: Write the job summary
+        if: always() && env.REVIEW == 'true'
+        env:
+          FACTORY_SHA: ${{ job.workflow_sha }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+          JOB_STATUS: ${{ job.status }}
+          ARTIFACT_NAME: review-transcript-${{ github.run_attempt }}
+          ARTIFACT_URL: ${{ steps.transcript.outputs.artifact-url }}
+        run: |
+          if [ "$JOB_STATUS" != "success" ]; then
+            outcome="\`failed\` (job $JOB_STATUS)"
+          elif verdict="$("$FACTORY/scripts/review/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/summary-description.txt" 2>/dev/null)"; then
+            outcome="review verdict \`$verdict\`, which the post job sets as \`factory/review\` (\"$(cat "$RUNNER_TEMP/summary-description.txt")\")"
+          else
+            outcome="\`failed\`: no valid outcome file, so the post job fails the run"
+          fi
+          {
+            echo "### Review run"
+            echo
+            echo "- **Ticket:** ${TICKET:+#}${TICKET:-unknown}"
+            echo "- **PR:** #$PR_NUMBER at \`$HEAD_SHA\`"
+            echo "- **Outcome:** $outcome"
+            "$FACTORY/scripts/run-figures" "$EXECUTION_FILE" \
+              || echo "- **Turns, tokens and cost:** could not be read"
+            "$FACTORY/scripts/run-summary" review "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "$BASE_TIP" "$EXECUTION_FILE" \
+              || echo "- **Skills run:** could not be read"
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "- **Transcript:** [$ARTIFACT_NAME]($ARTIFACT_URL), kept 14 days; the factory's \`scripts/run-report $GH_REPO $GITHUB_RUN_ID\` digests it"
+            else
+              echo "- **Transcript:** none (no execution file was uploaded)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Deterministic: no agent runs here. It posts the review as claude[bot] and
   # sets `factory/review` with GITHUB_TOKEN. A missing or malformed outcome or

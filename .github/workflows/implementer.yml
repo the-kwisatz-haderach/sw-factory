@@ -90,7 +90,6 @@ jobs:
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
           echo "BRANCH=agent/issue-$ticket" >> "$GITHUB_ENV"
           echo "ticket=$ticket" >> "$GITHUB_OUTPUT"
-          echo "Ticket: #$ticket" >> "$GITHUB_STEP_SUMMARY"
 
       # Before the claim and before any tokens are spent: without `## Checks`
       # on the default branch there is nothing to judge the work by.
@@ -129,9 +128,6 @@ jobs:
           pr="$(gh pr list --head "$BRANCH" --state open --json number,isCrossRepository \
             | "$FACTORY/scripts/implementer/pr-to-continue")"
           echo "PR_NUMBER=$pr" >> "$GITHUB_ENV"
-          if [ -n "$pr" ]; then
-            echo "Continuing PR #$pr" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       # No persisted credentials: the agent step must hold no GITHUB_TOKEN, and
       # the push step brings its own.
@@ -223,22 +219,11 @@ jobs:
         if: env.TICKET != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          FACTORY_SHA: ${{ job.workflow_sha }}
-          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
         run: |
-          # The agent's part of the job summary (ticket class, which version
-          # of each skill ran, unrelated issues noticed), written before the
-          # outcome is judged so a rejected outcome still shows what it said.
-          # BASE_SHA is what the run started from, so a target-repo override
-          # is the one the agent loaded. The skills come from the transcript's
-          # Skill calls, not the agent's word, whenever the transcript reads.
-          "$FACTORY/scripts/implementer/run-summary" "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "$BASE_SHA" "$EXECUTION_FILE" \
-            >> "$GITHUB_STEP_SUMMARY" || echo "::warning::Could not summarise the outcome file."
           if ! outcome="$("$FACTORY/scripts/implementer/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/agent-comment.md")"; then
             echo "::error::The outcome file is missing or malformed."
             exit 1
           fi
-          echo "Outcome: \`$outcome\`" >> "$GITHUB_STEP_SUMMARY"
           route="$outcome"
           if [ "$route" = "done" ]; then
             # The whole PR, not just this run's commits, must leave the
@@ -252,7 +237,6 @@ jobs:
             if ! "$FACTORY/scripts/implementer/checks-unchanged" "$RUNNER_TEMP/default-claude.md" "$RUNNER_TEMP/head-claude.md" \
                  > "$RUNNER_TEMP/checks-diff.txt"; then
               route="checks-changed"
-              echo "Branch changes \`CLAUDE.md\`'s \`## Checks\` section; handed back." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           if [ "$route" = "done" ]; then
@@ -343,13 +327,74 @@ jobs:
               --base "$DEFAULT_BRANCH" --head "$BRANCH" \
               --title "$title" --body-file "$RUNNER_TEMP/pr-body.md")"
           fi
-          echo "PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+          # Read by the job summary, written once by the job's last step so
+          # a run that breaks still gets the whole record.
+          echo "PR_URL=$pr_url" >> "$GITHUB_ENV"
 
       - name: Move the ticket to in-review
         if: steps.outcome.outputs.route == 'done'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:in-review
+
+      # The last two steps leave a record of every run that claimed a ticket,
+      # however it ended (docs/factory-design.md §11). They run after a failed,
+      # timed-out or cancelled agent step: its timeout is shorter than the
+      # job's, so they still get time. A job timeout skips them; report-failure
+      # still marks the ticket.
+      - name: Upload the transcript
+        id: transcript
+        if: always() && env.TICKET != '' && steps.claude.outcome != 'skipped'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementer-transcript-${{ github.run_attempt }}
+          path: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Deterministic, from what the steps above recorded. The skills come from
+      # the transcript's Skill calls, not the agent's word, whenever the
+      # transcript reads; BASE_SHA is what the run started from, so a
+      # target-repo override is the one the agent loaded. A run that broke
+      # before the outcome was checked reads as `failed`, with whatever the
+      # transcript and outcome file still show.
+      - name: Write the job summary
+        if: always() && env.TICKET != ''
+        env:
+          FACTORY_SHA: ${{ job.workflow_sha }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+          JOB_STATUS: ${{ job.status }}
+          ROUTE: ${{ steps.outcome.outputs.route }}
+          ARTIFACT_NAME: implementer-transcript-${{ github.run_attempt }}
+          ARTIFACT_URL: ${{ steps.transcript.outputs.artifact-url }}
+        run: |
+          case "$JOB_STATUS:$ROUTE" in
+            success:done) outcome="\`done\`" ;;
+            success:needs-human) outcome="\`needs-human\`" ;;
+            success:checks-changed) outcome="\`needs-human\`: the branch changes \`CLAUDE.md\`'s \`## Checks\` section" ;;
+            *) outcome="\`failed\` (job ${JOB_STATUS}${ROUTE:+, after route \`$ROUTE\`})" ;;
+          esac
+          if [ -n "${PR_URL:-}" ]; then pr="$PR_URL"
+          elif [ -n "${PR_NUMBER:-}" ]; then pr="#$PR_NUMBER (continued; not updated by this run)"
+          else pr="none"
+          fi
+          {
+            echo "### Implementer run"
+            echo
+            echo "- **Ticket:** #$TICKET"
+            echo "- **PR:** $pr"
+            echo "- **Outcome:** $outcome"
+            "$FACTORY/scripts/run-figures" "$EXECUTION_FILE" \
+              || echo "- **Turns, tokens and cost:** could not be read"
+            "$FACTORY/scripts/run-summary" implementer "$RUN_DIR/outcome.json" "$FACTORY" "$FACTORY_SHA" "${BASE_SHA:-HEAD}" "$EXECUTION_FILE" \
+              || echo "- **Skills, ticket class and unrelated issues:** could not be read"
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "- **Transcript:** [$ARTIFACT_NAME]($ARTIFACT_URL), kept 14 days; the factory's \`scripts/run-report $GH_REPO $GITHUB_RUN_ID\` digests it"
+            else
+              echo "- **Transcript:** none (no execution file was uploaded)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # A separate job, because a timed-out or cancelled job skips its own
   # failure() steps (docs/factory-design.md §13 item 4). Any run that claimed a

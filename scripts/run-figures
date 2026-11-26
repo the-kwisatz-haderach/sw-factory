@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usage: run-figures <execution-file>
+# Prints the job summary's figures for one agent run, from the result message
+# in claude-code-action's execution file (a JSON array of SDK messages): the
+# turns and how the run ended, the duration, the token counts and the cost.
+# A run cut short (a timeout, a cancel) has no result message, and a missing
+# or unreadable file is no transcript; each prints one line saying so. Never
+# fails: the summary is best-effort.
+set -euo pipefail
+file="${1:?usage: run-figures <execution-file>}"
+if ! [ -f "$file" ] || ! jq -e 'type == "array"' "$file" > /dev/null 2>&1; then
+  echo "- **Turns, tokens and cost:** no transcript"
+  exit 0
+fi
+jq -r '
+  def commas: tostring | until(test("^[0-9]{4}") | not; sub("^(?<a>[0-9]+)(?<b>[0-9]{3})"; "\(.a),\(.b)"));
+  def n: (. // 0) | floor | commas;
+  def duration: (. // 0) / 1000 | if . < 60 then "\(. * 10 | round / 10) s"
+    else round | "\(. / 60 | floor) min \(. % 60) s" end;
+  def cost: (. // 0) * 100 | round | tostring
+    | (if length < 3 then ("00" + .)[-3:] else . end) | "$\(.[:-2]).\(.[-2:])";
+  (map(objects | select(.type == "result")) | last) as $r
+  | if $r == null then
+      "- **Turns, tokens and cost:** not recorded (the agent ended without a result, e.g. on a timeout)"
+    else
+      "- **Turns:** \($r.num_turns | n) (`\($r.subtype // "unknown")`) in \($r.duration_ms | duration)",
+      "- **Tokens:** \($r.usage.input_tokens | n) input, \($r.usage.output_tokens | n) output, \($r.usage.cache_read_input_tokens | n) cache read, \($r.usage.cache_creation_input_tokens | n) cache write",
+      "- **Cost:** \($r.total_cost_usd | cost)"
+    end
+' "$file"

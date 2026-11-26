@@ -2,7 +2,7 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib.sh"
-run_summary="$here/../implementer/run-summary"
+run_summary="$here/../run-summary"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 # A target repo whose base commit overrides `tdd`, and a factory plugin with
@@ -22,7 +22,8 @@ for s in tdd diagnosing-bugs; do
 done
 sha=0123456789abcdef0123456789abcdef01234567
 
-summary() { (cd "$target" && "$run_summary" "$1" "$factory" "$sha" "$base" ${2:+"$2"}); }
+summary() { (cd "$target" && "$run_summary" implementer "$1" "$factory" "$sha" "$base" ${2:+"$2"}); }
+review_summary() { (cd "$target" && "$run_summary" review "$1" "$factory" "$sha" "$base" ${2:+"$2"}); }
 line() { summary "$1" ${3:+"$3"} | grep -F -- "$2"; }
 skills_section() { summary "$1" "$2" | sed -n '/Skills run/,/Unrelated/p' | sed '$d' | grep -v "own list"; }
 from_unrelated() { summary "$1" | sed -n '/Unrelated/,$p'; }
@@ -48,8 +49,6 @@ expect_output "lists the unrelated issues the agent noticed" "$expected" \
   from_unrelated "$tmp/noticed.json"
 expect_output "no unrelated issues reads as none" "- **Unrelated issues noticed:** none" line "$tmp/bug.json" "Unrelated"
 
-expect_output "a missing outcome file prints nothing" "" summary "$tmp/absent.json"
-
 echo '{"outcome": "needs-human", "comment": "?", "class": "none"}' > "$tmp/none.json"
 expect_output "class none reads as fitting no class" "- **Ticket class:** none (fits no class)" line "$tmp/none.json" "Ticket class"
 echo '{"outcome": "needs-human", "comment": "?", "class": "feature"}' > "$tmp/odd.json"
@@ -64,10 +63,6 @@ echo '{"outcome": "done", "class": "bug-fix", "skills": ["../../etc", "grilling"
 expect_output "a malformed skill name is flagged" "  - \`../../etc\`: not a skill name" line "$tmp/strange.json" "etc"
 expect_output "a skill neither repo nor factory has is flagged" \
   "  - \`grilling\`: neither a target repo skill nor a factory skill" line "$tmp/strange.json" "grilling"
-
-echo '["done"]' > "$tmp/array.json"
-expect_output "an outcome file that isn't an object prints nothing" "" summary "$tmp/array.json"
-expect_status "an outcome file that isn't an object doesn't fail" 0 summary "$tmp/array.json"
 
 # With the transcript, the skills come from the Skill tool calls it shows,
 # not from the agent's own list.
@@ -108,5 +103,32 @@ expect_output "a transcript with no skill calls reads as none" "- **Skills run**
 expect_output "an unreadable transcript falls back to the agent's list" \
   "- **Skills run** (as reported by the agent; no transcript):" \
   line "$tmp/skills.json" "Skills run" "$tmp/absent-transcript.json"
+
+# A run that broke before the agent wrote its outcome file still shows the
+# skills the transcript saw; the class and unrelated issues are unknown.
+expect_output "a missing outcome file still lists the transcript's skills" "$(printf '%s\n' \
+  '- **Skills run** (from the transcript):' \
+  "  - \`diagnosing-bugs\`: factory (\`factory:diagnosing-bugs\` at 0123456, upstream mattpocock-skills 1.3.1)" \
+  "  - \`tdd\`: target repo override (\`.claude/skills/tdd/SKILL.md\`, blob ${override_blob:0:7})")" \
+  summary "$tmp/absent.json" "$tmp/t-bug.json"
+echo '["done"]' > "$tmp/array.json"
+expect_output "an outcome file that isn't an object counts as missing" \
+  "- **Skills run:** unknown (no transcript)" summary "$tmp/array.json"
+expect_status "an outcome file that isn't an object doesn't fail" 0 summary "$tmp/array.json"
+
+# A review run records no class, unrelated issues or skills of its own: its
+# skills come from the transcript alone.
+echo '{"outcome": "pass", "reason": "fine"}' > "$tmp/review.json"
+transcript "$tmp/t-review.json" factory:review factory:tdd
+expect_output "a review lists the transcript's skills, without the task skill, and nothing else" \
+  "$(printf '%s\n' '- **Skills run** (from the transcript):' \
+    "  - \`tdd\`: factory (\`factory:tdd\` at 0123456, upstream mattpocock-skills 1.3.1), but the target repo's override \`.claude/skills/tdd/SKILL.md\` was skipped")" \
+  review_summary "$tmp/review.json" "$tmp/t-review.json"
+expect_output "a review without a transcript lists its skills as unknown" \
+  "- **Skills run:** unknown (no transcript)" \
+  review_summary "$tmp/review.json"
+
+expect_status "an unknown task fails rather than reading as a review" 2 \
+  "$run_summary" reveiw "$tmp/review.json" "$factory" "$sha" "$base"
 
 finish
