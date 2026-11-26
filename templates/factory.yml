@@ -8,7 +8,8 @@ on:
     types: [labeled]
   pull_request:
     types: [opened, synchronize]
-  # Chaining (no inputs) and, once it exists, rework (all three).
+  # Chaining (no inputs), review's backstop (pr only) and, once it exists,
+  # rework (all three).
   workflow_dispatch:
     inputs:
       ticket:
@@ -20,7 +21,8 @@ on:
       round:
         type: string
         required: false
-  # The daily backstop: the implementer picks up the oldest ready ticket.
+  # The daily backstop: the implementer picks up the oldest ready ticket, and
+  # review re-reviews every open agent PR whose head has no verdict.
   schedule:
     - cron: "0 2 * * *"
 
