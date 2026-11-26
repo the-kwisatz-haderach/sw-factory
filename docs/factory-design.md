@@ -298,7 +298,7 @@ Decided in [#10](https://github.com/the-kwisatz-haderach/sw-factory/issues/10) a
 
 - An allowlisted actor adds `agent:ready` (`issues: labeled`).
 - The **daily backstop** `schedule` at **02:00 UTC**.
-- **Chaining:** `workflow_dispatch` from the previous run's final step, with no ticket input ([§10](#10-brakes)).
+- **Chaining:** `workflow_dispatch` from the previous run's final step, with no inputs ([§10](#10-brakes)). A dispatch with only a PR input is review's backstop ([§8](#8-task-automated-review)) and starts no implementer run (`scripts/test/review-dispatch-contract.test.sh`).
 - **Rework:** `workflow_dispatch` from a failed review, with ticket, PR and round inputs ([§8](#8-task-automated-review)).
 
 Each triggered or chained run takes the **oldest `agent:ready` ticket** in the repo, not necessarily the one that triggered it. The labels are the queue, so a pending run cancelled by the concurrency group strands no ticket.
@@ -396,6 +396,7 @@ Decided in [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11) a
 
 - A PR from an `agent/issue-*` branch is `opened` or `synchronize`d by an allowlisted actor: `claude[bot]`, or the owner pushing a fix by hand.
 - The **daily backstop** (`schedule`) re-runs review for open agent PRs whose head SHA has no `factory/review` `success` or `failure`, i.e. the status is missing or `error`.
+  - **Built ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)):** a `backstop` job lists the open PRs (`scripts/review/agent-prs`: open, from an `agent/issue-*` branch of the repo itself), keeps the heads `scripts/review/ruled` finds no verdict on, and dispatches the stub once per PR with only the `pr` input, by `github-actions[bot]`. Each dispatch is a review run of its own, shaped like a push's, reviewing the PR's head at that moment. A head whose status can't be read is left for the next night (fail-closed), and the review run checks the status again.
 - Not in v1: reviewing the owner's own hand-written PRs, or a review-request label.
 
 ### 2. What does it do, and which services does it read and write?
@@ -445,13 +446,16 @@ Decided in [#11](https://github.com/the-kwisatz-haderach/sw-factory/issues/11) a
 
 ### 5. What stops two runs doing the same work?
 
-- A **per-PR concurrency group** `review-<pr>` with `cancel-in-progress: true`, separate from the implementer's group. A new push cancels a stale review, and reviews never cancel or get cancelled by implementer runs.
+- A **per-PR concurrency group** `review-<pr>`, separate from the implementer's group, with `cancel-in-progress` for pushes only. A new push cancels a stale review, and reviews never cancel or get cancelled by implementer runs.
 - The **ruled-SHA skip**, so a re-delivered event, a re-run or the backstop never reviews the same commit twice.
+- A backstop review doesn't cancel a running review of the same PR (`cancel-in-progress` only for pushes): it waits behind it, and that review's verdict then makes it skip. A push still cancels a running backstop review. A group holds at most one pending run whatever `cancel-in-progress` says, so a backstop dispatch replaces a pending push review: that run's `report-failure` sets `error`, and the backstop reviews the same current head, whose verdict replaces it.
 
 ### Failure behaviour
 
-- A follow-up job (`if: failure() || cancelled()`) sets `factory/review` to **`error`** with a link to the run. The ticket stays `agent:in-review`.
-- A **usage limit** sets `error` with "usage limit" in the description. The next backstop re-reviews.
+- A follow-up job, `report-failure` (`needs: [review, post]`, `if: failure() || cancelled()`, 5 min timeout), sets `factory/review` to **`error`** with a link to the run. The ticket stays `agent:in-review`. The next push or backstop re-reviews.
+- It never replaces a verdict: if the head SHA already has `success` or `failure` (another run ruled on it first), it leaves it.
+- A **usage limit** sets `error` with "usage limit" in the description; any other break says "review run broke".
+- A run that broke before it knew its head SHA (a backstop dispatch whose PR couldn't be read) marks nothing; the next backstop finds the head unruled.
 
 ## 9. Bookkeeping jobs
 
@@ -498,7 +502,7 @@ Decided in [#19](https://github.com/the-kwisatz-haderach/sw-factory/issues/19), 
   - a comment, "usage limit hit, re-queued for the next backstop", with the run link
   - no chaining
 - **Review:** `factory/review` `error`, "usage limit".
-- **Built ([#32](https://github.com/the-kwisatz-haderach/sw-factory/issues/32)):** a `Check for the usage limit` step after each agent step runs `scripts/usage-limited` on the execution file and, on a match, fails the job, so nothing after it pushes, posts a verdict or chains. The implementer's `report-failure` then re-queues instead of failing; the review's `report-usage-limit` job sets the `error` status. The shape matched is in [§13](#13-verify-while-building) item 7.
+- **Built ([#32](https://github.com/the-kwisatz-haderach/sw-factory/issues/32)):** a `Check for the usage limit` step after each agent step runs `scripts/usage-limited` on the execution file and, on a match, fails the job, so nothing after it pushes, posts a verdict or chains. The implementer's `report-failure` then re-queues instead of failing; the review's `report-failure` job sets the `error` status, "usage limit hit". The shape matched is in [§13](#13-verify-while-building) item 7.
 - Backoff needs no shared state. `GITHUB_TOKEN` label writes start no runs, so the work waits for the next daily backstop. During a weekly-limit stretch, each daily attempt costs ~1–2 min.
 
 **Accepted trade-off:** concurrency is per repo only, so two target repos can draw on the subscription at once ([#7](https://github.com/the-kwisatz-haderach/sw-factory/issues/7)).
@@ -554,7 +558,7 @@ The topic is the registry. The sweep and rotation script find target repos with 
 - **Triggers:**
   - `issues: [labeled]`
   - `pull_request: [opened, synchronize, closed]`
-  - `workflow_dispatch` (inputs: ticket, PR, round)
+  - `workflow_dispatch` (inputs: ticket, PR, round). Chaining sends none, rework all three, review's backstop only PR. A stub without the PR input makes the backstop's dispatch fail with a 422, and the backstop run fails.
   - `schedule` (`0 2 * * *`)
 - **Jobs:** two, calling `implementer.yml` and `review.yml` `@main`. Each job picks its task by event, and both jobs accept `schedule`.
 - **Secrets:** passed explicitly.
@@ -600,8 +604,9 @@ These are assumptions to prove or disprove early. Each one names its fallback wh
 | 12 | Whether a single `setup-token` token can be revoked on its own | — | [#3](https://github.com/the-kwisatz-haderach/sw-factory/issues/3) |
 | 13 | **Where unmerged-PR-close handling runs.** [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) gives it to the board sweep; [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) subscribes the stub to `pull_request: closed`. The stub path writes the label with `GITHUB_TOKEN` at once and starts no run; a label written by the sweep's PAT would show up as the owner's and start a no-op implementer run. Recommended: the stub path. | the sweep, as in [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) | reconciliation of [#9](https://github.com/the-kwisatz-haderach/sw-factory/issues/9) and [#18](https://github.com/the-kwisatz-haderach/sw-factory/issues/18) |
 | 14 | The review agent step runs on the job's read-only `GITHUB_TOKEN` (`github_token` input, no `id-token`) for a `claude[bot]`-triggered PR run, with `allowed_bots: "claude[bot]"`. **Token answered ([#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29)):** the action accepted the read-only token and passed the actor check on the first review run (run 45660737541 on the test target repo). That run also showed two things: setting `allowed_bots` turns off the action's default auto permission mode, so the review needs an explicit `--allowedTools` (without it, `Write` and `git` were denied and no outcome file was written); and the action never trusts a bot-authored PR, so `restrict_untrusted_prs` denies interpreters and shells, which the review doesn't need. | give the review job `id-token: write` and rely on `--disallowedTools` alone to keep the agent from pushing | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
-| 15 | A review job skipped by its `if` (another actor's push, a non-agent branch) doesn't take the `review-<pr>` group and cancel a running review. Also accepted: a re-run for an older SHA cancels the head's review, which then waits for the backstop ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)) | move the gate into the stub's job `if` | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
+| 15 | A review job skipped by its `if` (another actor's push, a non-agent branch) doesn't take the `review-<pr>` group and cancel a running review. Also accepted: a re-run for an older SHA cancels the head's review, whose `report-failure` sets `error`, so the backstop re-reviews it ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)) | move the gate into the stub's job `if` | [#29](https://github.com/the-kwisatz-haderach/sw-factory/issues/29) |
 | 16 | The `always()` transcript upload and job summary run after an agent step that hit its own `timeout-minutes` ([#34](https://github.com/the-kwisatz-haderach/sw-factory/issues/34)). A step's timeout counts from the step's start and the job's from the job's, so the margin is the job timeout minus the agent timeout minus the time the steps before the agent took: 5 min for the implementer (checkout, the target's `factory-setup`, branch prep), 3 min for review. A slower setup lets the job timeout fire first, skipping both steps; `report-failure` still marks the ticket. Untried. | widen the job timeout, or calibrate with the other timeouts | [#34](https://github.com/the-kwisatz-haderach/sw-factory/issues/34) |
+| 17 | The review backstop ([#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31)): a `schedule` run of the stub dispatches it with only the PR input, the dispatched run (by `github-actions[bot]`) passes the review job's gate and claude-code-action's `allowed_bots`, and the implementer job skips it. Also untried: `report-failure` runs (`cancelled()` is true) when only the review job was cancelled by its concurrency group, running or pending, not the whole run by hand as in item 4; and for a pending one it can mark only a push's head, since a pending backstop review never read its PR. | fan the backstop out as a matrix in the schedule run itself, with per-PR artifacts for post and the follow-up | [#31](https://github.com/the-kwisatz-haderach/sw-factory/issues/31) |
 
 **Calibrate after the first week of traced runs:**
 

@@ -9,9 +9,15 @@
 # and a review verdict. A second job then posts one `claude[bot]` comment
 # review with inline comments and sets the `factory/review` commit status on
 # the head SHA, `success` or `failure`, linking to the review. Both jobs
-# succeed either way, so a red job only ever means the run broke. A review
-# that hits the subscription's usage limit sets `factory/review` to `error`
-# instead: not a verdict, so the commit is reviewed again (docs/factory-design.md §10).
+# succeed either way, so a red job only ever means the run broke. A run that
+# breaks, is cancelled or hits the subscription's usage limit sets
+# `factory/review` to `error` instead, linking to the run: not a verdict, so
+# the commit is reviewed again (§8 Failure behaviour, §10).
+#
+# The daily backstop (`schedule`, §8.1) re-reviews every open agent PR whose
+# head SHA has no verdict, `success` or `failure`: it dispatches the stub once
+# per PR with the `pr` input, so each backstop review is a run of its own,
+# shaped like a push's, with its own verdict or `error`.
 #
 # The review never pushes code and never runs checks: the target repo's PR CI
 # is the deterministic gate, and runs alongside this without being read. The
@@ -35,21 +41,103 @@ on:
         required: true
 
 jobs:
+  # The daily backstop (§8.1, §10): no agent runs here. A commit whose review
+  # broke, was cancelled or hit the usage limit has no verdict, and nothing
+  # else would review it until the next push. Each unruled head gets a
+  # dispatch of the stub with the `pr` input, which the review job below takes;
+  # dispatches with GITHUB_TOKEN start runs (§13 item 6). Fail-closed: a head
+  # whose status can't be read is left for the next night rather than
+  # risk reviewing a commit already ruled on. The review run checks again.
+  backstop:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+      statuses: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # A schedule event runs on the default branch.
+      DEFAULT_BRANCH: ${{ github.ref_name }}
+      STUB_REF: ${{ github.workflow_ref }}
+    steps:
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
+      - name: Dispatch a review for each unruled agent PR
+        run: |
+          set -o pipefail
+          factory=.factory-plugin
+          gh api --paginate --slurp "repos/$GH_REPO/pulls?state=open&per_page=100" \
+            | jq 'add // []' | "$factory/scripts/review/agent-prs" "$GH_REPO" > "$RUNNER_TEMP/prs.tsv"
+          # STUB_REF is "<owner>/<repo>/.github/workflows/<file>@<ref>".
+          stub="${STUB_REF%%@*}"
+          stub="${stub##*/}"
+          dispatched=0 ruled=0 unread=0 exit_code=0
+          # Read on fd 3, so nothing in the loop can eat the list.
+          while IFS=$'\t' read -r number head_sha _ <&3; do
+            if ! statuses="$(gh api "repos/$GH_REPO/commits/$head_sha/status?per_page=100")"; then
+              echo "::warning::Could not read the status of PR #$number's head; left for the next backstop."
+              unread=$((unread + 1))
+              continue
+            fi
+            if "$factory/scripts/review/ruled" <<< "$statuses" > /dev/null; then
+              ruled=$((ruled + 1))
+              continue
+            fi
+            if gh api -X POST "repos/$GH_REPO/actions/workflows/$stub/dispatches" \
+                -f ref="$DEFAULT_BRANCH" -f "inputs[pr]=$number" > /dev/null; then
+              dispatched=$((dispatched + 1))
+            else
+              echo "::error::Could not dispatch a review of PR #$number."
+              exit_code=1
+            fi
+          done 3< "$RUNNER_TEMP/prs.tsv"
+          echo "Backstop: $dispatched agent PR(s) dispatched for review, $ruled already ruled, $unread unreadable." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$exit_code"
+
   review:
+    # A push to an agent PR by an allowlisted actor, or a backstop dispatch:
+    # `pr` and no `ticket` (rework carries both, and is the implementer's),
+    # fired by the backstop job with GITHUB_TOKEN, so by github-actions[bot].
     if: >-
-      github.event_name == 'pull_request'
-      && (github.event.action == 'opened' || github.event.action == 'synchronize')
-      && startsWith(github.event.pull_request.head.ref, 'agent/issue-')
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor))
+      (github.event_name == 'pull_request'
+        && (github.event.action == 'opened' || github.event.action == 'synchronize')
+        && startsWith(github.event.pull_request.head.ref, 'agent/issue-')
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && contains(format(',{0},', inputs.allowlist), format(',{0},', github.triggering_actor)))
+      || (github.event_name == 'workflow_dispatch'
+        && github.event.inputs.pr
+        && !github.event.inputs.ticket
+        && github.triggering_actor == 'github-actions[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # One review per PR: a new push cancels the stale one. The group is the
-    # review's own, so reviews never cancel or get cancelled by implementer
-    # runs. Any other event gets a group of its own run.
+    # One review per PR: a new push cancels the stale one. A backstop review
+    # doesn't cancel a running review: it waits behind it, and that review's
+    # verdict then makes it skip. A group holds one pending run whatever
+    # cancel-in-progress says, so a backstop dispatch does replace a pending
+    # push review; it then reviews that same current head, and its verdict
+    # replaces the replaced run's `error`. The group is the review's own, so reviews never cancel or
+    # get cancelled by implementer runs. Any other event gets a group of its
+    # own run.
     concurrency:
-      group: review-${{ github.event.pull_request.number || github.run_id }}
-      cancel-in-progress: true
+      group: >-
+        review-${{ github.event.pull_request.number
+          || (!github.event.inputs.ticket && github.event.inputs.pr)
+          || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # Read-only, and no id-token: nothing the agent can reach can push, post
     # or set a status. The action gets this job's GITHUB_TOKEN rather than
     # minting a Claude App token.
@@ -61,16 +149,15 @@ jobs:
     defaults:
       run:
         shell: bash
+    # Read by post and report-failure, which runs even after a timeout or a
+    # cancel (§13 item 4): the PR and head are set by the first step.
     outputs:
+      pr_number: ${{ steps.pr.outputs.number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
       reviewed: ${{ steps.ruled.outputs.reviewed }}
       usage_limited: ${{ steps.usage.outputs.limited }}
     env:
       GH_REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      HEAD_REF: ${{ github.event.pull_request.head.ref }}
-      BASE_REF: ${{ github.event.pull_request.base.ref }}
-      BASE_TIP: ${{ github.event.pull_request.base.sha }}
       RUN_DIR: .factory-run
     steps:
       # The plugin comes from the exact commit of this running workflow, moved
@@ -88,16 +175,61 @@ jobs:
           mv .factory-plugin "$RUNNER_TEMP/factory"
           echo "FACTORY=$RUNNER_TEMP/factory" >> "$GITHUB_ENV"
 
-      # A re-delivered event or a re-run never reviews the same commit twice.
-      # A missing, `pending` or `error` status is not a verdict, so the commit
-      # is reviewed. Deliberately fail-open: if the status can't be read, the
-      # commit is reviewed rather than left without a verdict.
+      # A push carries its PR in the event; a backstop dispatch names only the
+      # number, so the PR is read now, and its current head is the one
+      # reviewed. Either way the PR must still be an open agent PR of this
+      # repo (scripts/review/agent-prs); one that closed since is left alone.
+      - name: Resolve the PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCHED_PR: ${{ github.event.inputs.pr }}
+        run: |
+          set -o pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            pr_json="$(jq '.pull_request' "$GITHUB_EVENT_PATH")"
+          elif [[ "$DISPATCHED_PR" =~ ^[1-9][0-9]*$ ]]; then
+            pr_json="$(gh api "repos/$GH_REPO/pulls/$DISPATCHED_PR")"
+          else
+            echo "::error::The dispatched \`pr\` input is not a PR number."
+            exit 1
+          fi
+          line="$(jq '[.]' <<< "$pr_json" | "$FACTORY/scripts/review/agent-prs" "$GH_REPO")"
+          if [ -z "$line" ]; then
+            echo "The PR is not an open agent PR of this repo; nothing to review." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          IFS=$'\t' read -r number head_sha head_ref base_ref base_tip <<< "$line"
+          {
+            echo "PR_NUMBER=$number"
+            echo "HEAD_SHA=$head_sha"
+            echo "HEAD_REF=$head_ref"
+            echo "BASE_REF=$base_ref"
+            echo "BASE_TIP=$base_tip"
+          } >> "$GITHUB_ENV"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      # A re-delivered event, a re-run or the backstop never reviews the same
+      # commit twice. A missing, `pending` or `error` status is not a verdict,
+      # so the commit is reviewed. If the status can't be read, a push's commit
+      # is reviewed rather than left without a verdict (fail-open); a backstop
+      # review is not, and waits for the next night (fail-closed, as the
+      # backstop job is).
       - name: Skip a commit already ruled on
         id: ruled
+        if: env.HEAD_SHA != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if verdict="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100" | "$FACTORY/scripts/review/ruled")"; then
+          if ! statuses="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100")"; then
+            if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              echo "Could not read the status of $HEAD_SHA; left for the next backstop." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            statuses='{"statuses":[]}'
+          fi
+          if verdict="$("$FACTORY/scripts/review/ruled" <<< "$statuses")"; then
             echo "\`factory/review\` already ruled \`$verdict\` on $HEAD_SHA; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -157,9 +289,10 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # This job's read-only token instead of a minted Claude App token.
           github_token: ${{ github.token }}
-          # The trigger is often claude[bot]'s own push; the action refuses
-          # bot actors it isn't told about.
-          allowed_bots: "claude[bot]"
+          # The trigger is often claude[bot]'s own push, or the backstop's
+          # dispatch by github-actions[bot]; the action refuses bot actors it
+          # isn't told about.
+          allowed_bots: "claude[bot],github-actions[bot]"
           prompt: |
             /factory:review
             PR: #${{ env.PR_NUMBER }}
@@ -184,7 +317,7 @@ jobs:
 
       # A review that ended on the usage limit is not a verdict (§10). The step
       # fails the job whatever the agent step's own outcome, so no verdict is
-      # handed on or posted; report-usage-limit sets `error` instead.
+      # handed on or posted; report-failure sets `error` instead.
       # CLAUDE_CODE_RETRY_WATCHDOG stays unset, so the agent fails fast at the
       # limit rather than waiting out the reset.
       - name: Check for the usage limit
@@ -286,8 +419,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+      HEAD_SHA: ${{ needs.review.outputs.head_sha }}
     steps:
       - name: Check out the factory plugin
         uses: actions/checkout@v6
@@ -332,27 +465,61 @@ jobs:
             echo "Review: $review_url"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Usage limit: re-queue, not fail (§10). `error` is not a verdict, so the
-  # next push reviews the commit again (scripts/review/ruled), and so will
-  # the backstop once it re-reviews (#31).
-  # Set with GITHUB_TOKEN, whose events start no runs. Every other failure
-  # leaves the commit without a status.
-  report-usage-limit:
-    needs: review
-    if: failure() && needs.review.outputs.usage_limited == 'true'
+  # Anything that breaks the run (a failed step or job, a malformed outcome
+  # file, a timeout, a cancel) sets `factory/review` to `error` with the run
+  # link (§8 Failure behaviour); a usage limit says so (§10). `error` is not a
+  # verdict, so the next push or backstop reviews the commit again
+  # (scripts/review/ruled). The ticket stays `agent:in-review`. A separate job,
+  # because a timed-out or cancelled job skips its own `failure()` steps.
+  # It never replaces a verdict: a run cancelled after another run ruled on
+  # the same commit leaves that verdict standing. Set with GITHUB_TOKEN, whose
+  # events start no runs.
+  report-failure:
+    needs: [review, post]
+    if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       statuses: write
+    defaults:
+      run:
+        shell: bash
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # A review cancelled before it started set no outputs; a push still
+      # names its head.
+      HEAD_SHA: ${{ needs.review.outputs.head_sha || github.event.pull_request.head.sha }}
+      USAGE_LIMITED: ${{ needs.review.outputs.usage_limited }}
     steps:
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
       - name: Set factory/review to error
         run: |
+          if [ -z "$HEAD_SHA" ]; then
+            echo "The run broke before it knew which commit to review; nothing to mark. The next backstop finds any unruled head." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if statuses="$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/status?per_page=100")" \
+            && verdict="$(.factory-plugin/scripts/review/ruled <<< "$statuses")"; then
+            echo "\`factory/review\` already ruled \`$verdict\` on $HEAD_SHA; left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$USAGE_LIMITED" = "true" ]; then
+            description="usage limit hit; not reviewed yet"
+          else
+            description="review run broke; not reviewed yet"
+          fi
           gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
             -f state=error -f context=factory/review \
-            -f description="usage limit hit; not reviewed yet" \
+            -f description="$description" \
             -f target_url="$RUN_URL" > /dev/null
+          echo "\`factory/review\` set to \`error\` on $HEAD_SHA: $description." | tee -a "$GITHUB_STEP_SUMMARY"

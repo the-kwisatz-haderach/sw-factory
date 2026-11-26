@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Usage: gh api repos/<owner>/<repo>/pulls?state=open | agent-prs <owner/repo>
+# Reads a JSON array of PRs (the pulls API's shape) and prints, one tab-separated
+# line each, in input order, the PRs review takes on: open, from an
+# `agent/issue-*` branch of <owner/repo> itself, not a fork. The fields are the
+# number, head SHA, head ref, base ref and base SHA. Exits 1 if the input isn't
+# an array, so an API error never reads as "no PRs".
+set -euo pipefail
+repo="$1"
+jq -r --arg repo "$repo" '
+  if type != "array" then error("not a PR array") else . end
+  | .[]
+  | select(.state == "open"
+      and (.head.ref | startswith("agent/issue-"))
+      and .head.repo.full_name == $repo)
+  | [.number, .head.sha, .head.ref, .base.ref, .base.sha] | @tsv
+' 2>/dev/null || exit 1

@@ -42,9 +42,10 @@ on:
 jobs:
   implement:
     # Three triggers (§7.1): an allowlisted human adds `agent:ready`; the daily
-    # backstop; or chaining, a dispatch with no ticket fired by the previous
+    # backstop; or chaining, a dispatch with no inputs fired by the previous
     # run with this workflow's GITHUB_TOKEN, so by github-actions[bot]. A
-    # dispatch with a ticket is rework, not handled here.
+    # dispatch with a ticket is rework, not handled here; one with only a `pr`
+    # is review's backstop (review.yml), and must not claim a ticket.
     if: >-
       (github.event_name == 'issues'
         && github.event.action == 'labeled'
@@ -55,6 +56,7 @@ jobs:
       || github.event_name == 'schedule'
       || (github.event_name == 'workflow_dispatch'
         && !github.event.inputs.ticket
+        && !github.event.inputs.pr
         && github.triggering_actor == 'github-actions[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -68,7 +70,7 @@ jobs:
       group: >-
         ${{ ((github.event_name == 'issues' && github.event.label.name == 'agent:ready' && !github.event.issue.pull_request)
           || github.event_name == 'schedule'
-          || (github.event_name == 'workflow_dispatch' && !github.event.inputs.ticket))
+          || (github.event_name == 'workflow_dispatch' && !github.event.inputs.ticket && !github.event.inputs.pr))
           && 'factory-implementer' || format('factory-implementer-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
