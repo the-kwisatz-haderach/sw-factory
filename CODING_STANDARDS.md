@@ -4,7 +4,7 @@ Read during review. The mechanical rules (shebangs, usage headers, strict mode, 
 
 ## Scripts
 
-- **Decide in a script, act in the workflow.** A script reads files or stdin and prints a decision; the workflow step makes the GitHub calls around it (`pick-ticket`, `read-outcome`, `board/plan`). A script that must call GitHub is a thin wrapper around one that doesn't (`board/sweep` around `board/plan`), so the logic stays testable without a network.
+- **Decide in a script, act in the workflow.** A script reads files or stdin and prints a decision; the workflow step makes the GitHub calls around it (`pick-ticket`, `read-outcome`, `board/plan`). A script that must call GitHub is a thin wrapper around one that doesn't (`board/sweep` around `board/plan`), so the logic stays testable without a network. A step's early exit on what it read from GitHub (a PR's state or head, a ticket's labels) is a decision too (`review/rework-skip`); only a check on the triggering event's own payload stays inline.
 - **Every script that decides something has a test** in `scripts/test/<name>.test.sh`, at the script's own interface. Expected values are literals worked out by hand, never recomputed the way the script computes them.
 - **Agent output fails closed.** Anything an agent writes (the outcome file, the PR body, a review) is untrusted input: validate its shape, and route anything unexpected to a failed run or a hand-back, never to a push or a pass.
 - **One source per contract.** A list or format that both a skill and a script rely on (`scripts/implementer/ticket-classes`) lives in one file, with a test that the skill's prose still matches it.

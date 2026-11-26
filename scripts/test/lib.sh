@@ -15,9 +15,15 @@ expect_status() {
   if [ "$got" -eq "$want" ]; then pass "$name"; else fail "$name (exit $got, want $want): $out"; fi
 }
 # expect_output <name> <expected-stdout> <command...>
+# A command that couldn't run (exit 126 or 127: not executable, not found)
+# fails, so a missing script never matches an expected empty output.
 expect_output() {
   local name="$1" want="$2"; shift 2
-  local got; got="$("$@" 2>/dev/null)"
-  if [ "$got" = "$want" ]; then pass "$name"; else fail "$name (got '$got', want '$want')"; fi
+  local got err; err="$(mktemp)"
+  got="$("$@" 2>"$err")"; local status=$?
+  if [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; then
+    fail "$name (the command couldn't run, exit $status: $(head -n1 "$err"))"
+  elif [ "$got" = "$want" ]; then pass "$name"; else fail "$name (got '$got', want '$want')"; fi
+  rm -f "$err"
 }
 finish() { [ "$failures" -eq 0 ]; }

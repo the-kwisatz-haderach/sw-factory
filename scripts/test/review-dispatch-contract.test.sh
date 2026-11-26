@@ -6,7 +6,9 @@
 # inputs, which the implementer must take and the review must not. This pins
 # both sides of each, and the stub template's inputs. Review's rework counts
 # rounds from the owners on its allowlist, standing in for the implementer's,
-# so the two defaults must match.
+# so the two defaults must match. Handback acts on a PR close, which reaches it
+# only if the stub forwards `closed`, and which must not share the review's
+# group, where it would cancel a running review.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib.sh"
@@ -18,6 +20,8 @@ implement="$(job implementer.yml implement)"
 backstop="$(job review.yml backstop)"
 review="$(job review.yml review)"
 rework="$(job review.yml rework)"
+handback="$(job review.yml handback)"
+stub="$here/../../templates/factory.yml"
 
 expect_status "the backstop dispatches with the \`pr\` input" 0 \
   grep -qF -- '-f "inputs[pr]=$number"' <<< "$backstop"
@@ -36,8 +40,16 @@ expect_status "the review job refuses a dispatch with a ticket" 0 \
   grep -qF '&& !github.event.inputs.ticket' <<< "$review"
 for input in ticket pr round; do
   expect_status "the stub template declares the \`$input\` input" 0 \
-    grep -qE "^      $input:$" "$here/../../templates/factory.yml"
+    grep -qE "^      $input:$" "$stub"
 done
+expect_status "handback acts on a PR close" 0 \
+  grep -qF "github.event.action == 'closed'" <<< "$handback"
+expect_status "the stub template forwards PR closes" 0 \
+  grep -qE '^    types: \[([a-z_]+, )*closed(, [a-z_]+)*\]$' \
+  <<< "$(awk '/^  pull_request:$/ { getline; print }' "$stub")"
+expect_status "a PR close gets a review group of its own run" 0 \
+  grep -qF "review-\${{ (github.event.action != 'closed' && github.event.pull_request.number)" <<< "$review"
+
 # The first `default:` after the `allowlist` input's key.
 default() { awk '/^      allowlist:$/ { in_input = 1 } in_input && /^        default:/ { print; exit }' "$workflows/$1"; }
 expect_status "both tasks default to the same allowlist" 0 \
