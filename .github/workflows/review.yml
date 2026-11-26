@@ -495,10 +495,11 @@ jobs:
   # the PR's commits since an allowlisted human last added `agent:ready`
   # (scripts/review/rework-round). Past REWORK_CAP the ticket goes to a human
   # instead. Only a fail on a PR still open, at its current head, counts as a
-  # send-back, and only a ticket still `agent:in-review` is moved: a closed PR
-  # is the owner's rejection (handback hands its ticket back, or the merge
-  # closed it), a newer push gets its own review, and a ticket a human or a run
-  # has moved on is theirs. A PR closed after this check is not caught (#41).
+  # send-back, and only a ticket still `agent:in-review` is moved
+  # (scripts/review/rework-skip): a closed PR is the owner's rejection
+  # (handback hands its ticket back, or the merge closed it), a newer push gets
+  # its own review, and a ticket a human or a run has moved on is theirs. A PR
+  # closed after this check is not caught (#41).
   # One rework per PR at a time, so two quick fails can't both send the ticket
   # back. A break here turns the run red but leaves the verdict standing
   # (report-failure doesn't wait on this job); a ticket left `agent:ready` by a
@@ -550,22 +551,15 @@ jobs:
         run: |
           set -o pipefail
           factory=.factory-plugin
-          # Captured first: a failure inside `read <<<` would be masked.
-          pr="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '"\(.state) \(.head.sha)"')"
-          read -r state head <<< "$pr"
-          if [ "$state" != "open" ]; then
-            echo "PR #$PR_NUMBER is $state; rework leaves its ticket alone." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [ "$head" != "$HEAD_SHA" ]; then
-            echo "PR #$PR_NUMBER moved on from $HEAD_SHA; its new head gets its own review." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          labels="$(gh issue view "$TICKET" --json labels --jq '[.labels[].name] | join(",")')"
-          if [[ ",$labels," != *",agent:in-review,"* ]]; then
-            echo "Ticket #$TICKET is not \`agent:in-review\` ($labels); left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          # Each early end, said in the log and the job summary.
+          end_with() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh issue view "$TICKET" --json number,labels > "$RUNNER_TEMP/ticket.json"
+          # Captured first, so a PR or ticket that couldn't be read fails the
+          # step rather than reading as "go on".
+          reason="$("$factory/scripts/review/rework-skip" "$HEAD_SHA" \
+            "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/ticket.json")"
+          [ -z "$reason" ] || end_with "$reason"
           gh api --paginate --slurp "repos/$GH_REPO/issues/$TICKET/events?per_page=100" \
             | jq 'add // []' > "$RUNNER_TEMP/events.json"
           gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR_NUMBER/commits?per_page=100" \
@@ -588,8 +582,7 @@ jobs:
           Run: $RUN_URL
           EOF
             gh issue edit "$TICKET" --remove-label agent:in-review --add-label agent:needs-human
-            echo "Rework cap: review failed $count times; ticket #$TICKET handed to a human." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
+            end_with "Rework cap: review failed $count times; ticket #$TICKET handed to a human."
           fi
 
           # Ready first: the dispatched run takes the oldest ready ticket.

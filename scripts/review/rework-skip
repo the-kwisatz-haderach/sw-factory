@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Usage: rework-skip <reviewed-head-sha> <pr.json> <ticket.json>
+# Decides whether rework (§8.3) leaves a failed review alone. <pr.json> is the
+# PR as GET repos/<r>/pulls/<n> returns it; <ticket.json> is the ticket as
+# `gh issue view --json number,labels` prints it. Prints the reason to leave
+# it, or nothing if rework goes on: the PR is open, still at the reviewed head,
+# and its ticket is still `agent:in-review`. Exits 1 if either file isn't
+# what it should be, so an API error never reads as a reason to skip.
+set -euo pipefail
+head_sha="$1" pr="$2" ticket="$3"
+jq -rn --arg head "$head_sha" --slurpfile pr "$pr" --slurpfile ticket "$ticket" '
+  $pr[0] as $pr | $ticket[0] as $ticket
+  | if ($pr.state | type) != "string" or ($pr.head.sha | type) != "string"
+      or ($ticket.labels | type) != "array"
+    then error("not a PR and a ticket") else . end
+  | [$ticket.labels[].name] as $labels
+  | if $pr.state != "open" then
+      "PR #\($pr.number) is \($pr.state); rework leaves its ticket alone."
+    elif $pr.head.sha != $head then
+      "PR #\($pr.number) moved on from \($head); its new head gets its own review."
+    elif ($labels | any(. == "agent:in-review") | not) then
+      "Ticket #\($ticket.number) is not `agent:in-review` (\($labels | join(","))); left as it is."
+    else empty end' 2>/dev/null || exit 1
