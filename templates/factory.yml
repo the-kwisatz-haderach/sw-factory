@@ -8,8 +8,8 @@ on:
     types: [labeled]
   pull_request:
     types: [opened, synchronize]
-  # Chaining (no inputs), review's backstop (pr only) and, once it exists,
-  # rework (all three).
+  # Chaining (no inputs), review's backstop (pr only) and rework after a
+  # failed review (all three).
   workflow_dispatch:
     inputs:
       ticket:

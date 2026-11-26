@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Usage: rework-round <allowlist> <cap> <events.json> <statuses.json>
+# Decides what a failed review leads to (docs/factory-design.md §8.3).
+# <events.json> is the ticket's issue events; <statuses.json> the statuses of
+# every commit on the PR, one array. Rounds are the `factory/review` failures
+# since the owner (an allowlisted login that isn't a bot) last added
+# `agent:ready`; the workflow's own label writes don't reset the count.
+# Prints `rework <round>` while the failures are within <cap>, else
+# `needs-human <failures>`.
+set -euo pipefail
+allowlist="$1" cap="$2" events="$3" statuses="$4"
+failures="$(jq -n --arg allowlist "$allowlist" --slurpfile events "$events" --slurpfile statuses "$statuses" '
+  ($allowlist | split(",") | map(select(endswith("[bot]") | not))) as $owners
+  | ([$events[0][]
+      | select(.event == "labeled" and .label.name == "agent:ready" and (.actor.login as $a | $owners | index($a)))
+      | .created_at] | max // "") as $since
+  | [$statuses[0][]
+      | select(.context == "factory/review" and .state == "failure" and .created_at > $since)]
+  | length')"
+if [ "$failures" -le "$cap" ]; then
+  echo "rework $failures"
+else
+  echo "needs-human $failures"
+fi

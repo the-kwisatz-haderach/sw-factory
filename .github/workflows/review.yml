@@ -14,6 +14,12 @@
 # `factory/review` to `error` instead, linking to the run: not a verdict, so
 # the commit is reviewed again (§8 Failure behaviour, §10).
 #
+# A `fail` sends the PR back for rework (§8.3): the ticket goes back to
+# `agent:ready` and the implementer is dispatched with ticket, PR and round,
+# continuing the PR and reading the review; its push starts a new review.
+# After REWORK_CAP automatic rounds since the owner last added `agent:ready`,
+# the ticket goes to `agent:needs-human` instead.
+#
 # The daily backstop (`schedule`, §8.1) re-reviews every open agent PR whose
 # head SHA has no verdict, `success` or `failure`: it dispatches the stub once
 # per PR with the `pr` input, so each backstop review is a run of its own,
@@ -154,6 +160,7 @@ jobs:
     outputs:
       pr_number: ${{ steps.pr.outputs.number }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
+      ticket: ${{ steps.context.outputs.ticket }}
       reviewed: ${{ steps.ruled.outputs.reviewed }}
       usage_limited: ${{ steps.usage.outputs.limited }}
     env:
@@ -253,6 +260,7 @@ jobs:
       # a `prompt`, so the factory does it.
       # No factory-setup: the review runs no code from the PR.
       - name: Prepare the review context
+        id: context
         if: env.REVIEW == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -271,6 +279,7 @@ jobs:
             exit 1
           fi
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
+          echo "ticket=$ticket" >> "$GITHUB_OUTPUT"
           gh issue view "$ticket" --json number,title,body,comments \
             | "$FACTORY/scripts/ticket-thread" > "$RUN_DIR/ticket.md"
 
@@ -412,6 +421,10 @@ jobs:
     permissions:
       statuses: write
       id-token: write
+    # Read by rework, which acts on a `fail`.
+    outputs:
+      verdict: ${{ steps.post.outputs.verdict }}
+      review_url: ${{ steps.post.outputs.review_url }}
     defaults:
       run:
         shell: bash
@@ -437,6 +450,7 @@ jobs:
           path: verdict
 
       - name: Post the review and set factory/review
+        id: post
         run: |
           factory=.factory-plugin
           if ! verdict="$("$factory/scripts/review/read-outcome" verdict/outcome.json "$RUNNER_TEMP/description.txt")"; then
@@ -460,10 +474,116 @@ jobs:
             -f state="$state" -f context=factory/review \
             -f description="$(cat "$RUNNER_TEMP/description.txt")" \
             -f target_url="$review_url" > /dev/null
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "review_url=$review_url" >> "$GITHUB_OUTPUT"
           {
             echo "Review verdict: \`$verdict\` ($(cat "$RUNNER_TEMP/description.txt"))"
             echo "Review: $review_url"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # A `fail` sends the PR back to the implementer (§8.3); no agent runs here.
+  # Rework is not a task of its own: the ticket goes back to `agent:ready` and
+  # the stub is dispatched with ticket, PR and round, which the implementer
+  # takes like any other run (the oldest ready ticket, continuing its open PR
+  # and reading the review). Label writes with GITHUB_TOKEN start no runs, but
+  # the dispatch does (§13 item 6). They come from github-actions[bot], so
+  # they never reset the rework cap: rounds are `factory/review` failures on
+  # the PR's commits since an allowlisted human last added `agent:ready`
+  # (scripts/review/rework-round). Past REWORK_CAP the ticket goes to a human
+  # instead. Only a fail on the PR's current head counts as a send-back, and
+  # only a ticket still `agent:in-review` is moved: a newer push gets its own
+  # review, and a ticket a human or a run has moved on is theirs. One rework
+  # per PR at a time, so two quick fails can't both send the ticket back. A break here turns the run red but
+  # leaves the verdict standing (report-failure doesn't wait on this job); a
+  # ticket left `agent:ready` by a failed dispatch waits for the implementer's
+  # daily backstop.
+  rework:
+    needs: [review, post]
+    if: needs.post.outputs.verdict == 'fail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: rework-${{ needs.review.outputs.pr_number }}
+      cancel-in-progress: false
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: read
+      statuses: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
+      STUB_REF: ${{ github.workflow_ref }}
+      TICKET: ${{ needs.review.outputs.ticket }}
+      PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+      HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+      REVIEW_URL: ${{ needs.post.outputs.review_url }}
+      ALLOWLIST: ${{ inputs.allowlist }}
+      # Automatic rounds before a human takes over (§10).
+      REWORK_CAP: 2
+    steps:
+      - name: Check out the factory plugin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .factory-plugin
+          persist-credentials: false
+
+      - name: Send the PR back for rework, or to a human at the cap
+        run: |
+          set -o pipefail
+          factory=.factory-plugin
+          head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$head" != "$HEAD_SHA" ]; then
+            echo "PR #$PR_NUMBER moved on from $HEAD_SHA; its new head gets its own review." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          labels="$(gh issue view "$TICKET" --json labels --jq '[.labels[].name] | join(",")')"
+          if [[ ",$labels," != *",agent:in-review,"* ]]; then
+            echo "Ticket #$TICKET is not \`agent:in-review\` ($labels); left as it is." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh api --paginate --slurp "repos/$GH_REPO/issues/$TICKET/events?per_page=100" \
+            | jq 'add // []' > "$RUNNER_TEMP/events.json"
+          gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR_NUMBER/commits?per_page=100" \
+            | jq -r 'add // [] | .[].sha' > "$RUNNER_TEMP/commits.txt"
+          while read -r sha; do
+            gh api --paginate --slurp "repos/$GH_REPO/commits/$sha/statuses?per_page=100" \
+              | jq 'add // []' || exit 1
+          done < "$RUNNER_TEMP/commits.txt" | jq -s 'add // []' > "$RUNNER_TEMP/statuses.json"
+          # Captured first: a failure inside `read <<<` would be masked.
+          decided="$("$factory/scripts/review/rework-round" "$ALLOWLIST" "$REWORK_CAP" \
+            "$RUNNER_TEMP/events.json" "$RUNNER_TEMP/statuses.json")"
+          read -r decision count <<< "$decided"
+
+          if [ "$decision" = "needs-human" ]; then
+            gh issue comment "$TICKET" --body-file - <<EOF
+          The automated review failed PR #$PR_NUMBER $count times since \`agent:ready\` was last added, past the $REWORK_CAP automatic rework rounds, so the ticket comes back to you. Latest review: $REVIEW_URL
+
+          Fix the PR or the ticket, then re-add \`agent:ready\`, which resets the count.
+
+          Run: $RUN_URL
+          EOF
+            gh issue edit "$TICKET" --remove-label agent:in-review --add-label agent:needs-human
+            echo "Rework cap: review failed $count times; ticket #$TICKET handed to a human." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Ready first: the dispatched run takes the oldest ready ticket.
+          gh issue edit "$TICKET" --remove-label agent:in-review --add-label agent:ready
+          # STUB_REF is "<owner>/<repo>/.github/workflows/<file>@<ref>".
+          stub="${STUB_REF%%@*}"
+          stub="${stub##*/}"
+          gh api -X POST "repos/$GH_REPO/actions/workflows/$stub/dispatches" -f ref="$DEFAULT_BRANCH" \
+            -f "inputs[ticket]=$TICKET" -f "inputs[pr]=$PR_NUMBER" -f "inputs[round]=$count" > /dev/null
+          echo "Rework round $count of $REWORK_CAP: ticket #$TICKET is \`agent:ready\` again and \`$stub\` dispatched." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Anything that breaks the run (a failed step or job, a malformed outcome
   # file, a timeout, a cancel) sets `factory/review` to `error` with the run

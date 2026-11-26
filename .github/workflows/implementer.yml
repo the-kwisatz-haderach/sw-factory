@@ -2,9 +2,10 @@
 # stub. Everything here runs in the target repo: its minutes, logs and secrets.
 #
 # An allowlisted actor adds `agent:ready`, the daily backstop fires at 02:00
-# UTC, or the previous run chains on; the run claims the oldest ready ticket,
-# the agent builds it with the factory plugin, and on outcome `done`
-# the branch is pushed and the PR opened as `claude[bot]`. If the ticket's
+# UTC, the previous run chains on, or a failed review sends its PR back for
+# rework (review.yml); the run claims the oldest ready ticket, the agent
+# builds it with the factory plugin, and on outcome `done` the branch is
+# pushed and the PR opened as `claude[bot]`. If the ticket's
 # branch already has an open PR, the run continues that PR instead: new
 # commits on its branch, no force-push, the body rewritten. Without one, a
 # leftover branch of the same name is deleted before the push.
@@ -41,11 +42,12 @@ on:
 
 jobs:
   implement:
-    # Three triggers (§7.1): an allowlisted human adds `agent:ready`; the daily
-    # backstop; or chaining, a dispatch with no inputs fired by the previous
-    # run with this workflow's GITHUB_TOKEN, so by github-actions[bot]. A
-    # dispatch with a ticket is rework, not handled here; one with only a `pr`
-    # is review's backstop (review.yml), and must not claim a ticket.
+    # Four triggers (§7.1): an allowlisted human adds `agent:ready`; the daily
+    # backstop; chaining, a dispatch with no inputs fired by the previous run;
+    # or rework, a dispatch with ticket, PR and round fired by a failed review
+    # (review.yml's rework job). Both dispatches use GITHUB_TOKEN, so come from
+    # github-actions[bot]. A dispatch with only a `pr` is review's backstop
+    # (review.yml), and must not claim a ticket.
     if: >-
       (github.event_name == 'issues'
         && github.event.action == 'labeled'
@@ -58,19 +60,26 @@ jobs:
         && !github.event.inputs.ticket
         && !github.event.inputs.pr
         && github.triggering_actor == 'github-actions[bot]')
+      || (github.event_name == 'workflow_dispatch'
+        && github.event.inputs.ticket
+        && github.event.inputs.pr
+        && github.event.inputs.round
+        && github.triggering_actor == 'github-actions[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # One run in flight per repo and at most one pending: a newer pending run
     # replaces the older, which strands nothing, since every run takes the
     # oldest ready ticket (§7.5). Only the events that can pass the `if` share
-    # the group, so a skipped stub job (a PR push, another label, rework) can
-    # never take the pending slot from a real run. The actor checks are left
-    # out: an `agent:ready` from someone off the allowlist can still take it.
+    # the group, so a skipped stub job (a PR push, another label, review's
+    # backstop) can never take the pending slot from a real run. The actor
+    # checks are left out: an `agent:ready` from someone off the allowlist
+    # can still take it.
     concurrency:
       group: >-
         ${{ ((github.event_name == 'issues' && github.event.label.name == 'agent:ready' && !github.event.issue.pull_request)
           || github.event_name == 'schedule'
-          || (github.event_name == 'workflow_dispatch' && !github.event.inputs.ticket && !github.event.inputs.pr))
+          || (github.event_name == 'workflow_dispatch' && !github.event.inputs.ticket && !github.event.inputs.pr)
+          || (github.event_name == 'workflow_dispatch' && github.event.inputs.ticket && github.event.inputs.pr && github.event.inputs.round))
           && 'factory-implementer' || format('factory-implementer-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
@@ -139,11 +148,15 @@ jobs:
             echo "AT_CAP=true" >> "$GITHUB_ENV"
           fi
 
+      # Rework takes the oldest ready ticket too, which may not be the one the
+      # failed review sent back; the round is recorded only when it is.
       - name: Pick the oldest ready ticket
         id: pick
         if: env.AT_CAP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REWORK_TICKET: ${{ github.event.inputs.ticket }}
+          REWORK_ROUND: ${{ github.event.inputs.round }}
         run: |
           ticket="$(gh api --paginate --slurp "repos/$GH_REPO/issues?labels=agent%3Aready&state=open&per_page=100" \
             | jq 'add // []' | "$FACTORY/scripts/implementer/pick-ticket")"
@@ -153,6 +166,9 @@ jobs:
           fi
           echo "TICKET=$ticket" >> "$GITHUB_ENV"
           echo "BRANCH=agent/issue-$ticket" >> "$GITHUB_ENV"
+          if [ -n "$REWORK_TICKET" ] && [ "$REWORK_TICKET" = "$ticket" ]; then
+            echo "ROUND=$REWORK_ROUND" >> "$GITHUB_ENV"
+          fi
           echo "ticket=$ticket" >> "$GITHUB_OUTPUT"
 
       # Before the claim and before any tokens are spent: without `## Checks`
@@ -517,6 +533,9 @@ jobs:
             echo "- **Ticket:** #$TICKET"
             echo "- **PR:** $pr"
             echo "- **Outcome:** $outcome"
+            if [ -n "${ROUND:-}" ]; then
+              echo "- **Rework:** round $ROUND, after a failed automated review"
+            fi
             echo "- **Runs today:** $((${RUNS_TODAY:-0} + 1)) of $DAILY_CAP, this one included"
             echo "- **Chained:** ${CHAINED:-no: the run did not end in \`done\` or \`needs-human\`, or broke after}"
             "$FACTORY/scripts/run-figures" "$EXECUTION_FILE" \

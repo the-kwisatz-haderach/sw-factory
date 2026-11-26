@@ -2,7 +2,9 @@
 # The review backstop dispatches the stub with only a `pr` input, and the stub
 # calls both tasks on every dispatch. The implementer takes a dispatch with no
 # ticket as chaining, so without its `!github.event.inputs.pr` a backstop
-# review would also claim a ticket, silently. This pins both sides of that.
+# review would also claim a ticket, silently. Rework dispatches with all three
+# inputs, which the implementer must take and the review must not. This pins
+# both sides of each, and the stub template's inputs.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib.sh"
@@ -13,6 +15,7 @@ job() { awk -v key="  $2:" '/^  [a-z-]+:$/ { in_job = ($0 == key) } in_job' "$wo
 implement="$(job implementer.yml implement)"
 backstop="$(job review.yml backstop)"
 review="$(job review.yml review)"
+rework="$(job review.yml rework)"
 
 expect_status "the backstop dispatches with the \`pr\` input" 0 \
   grep -qF -- '-f "inputs[pr]=$number"' <<< "$backstop"
@@ -20,5 +23,18 @@ expect_status "the review job takes a dispatch with \`pr\` and no ticket" 0 \
   grep -qF '&& github.event.inputs.pr' <<< "$review"
 expect_output "the implementer's gate and its concurrency group both refuse a \`pr\` dispatch" 2 \
   sh -c 'grep -cF "!github.event.inputs.pr"' <<< "$implement"
+expect_status "rework dispatches with ticket, PR and round" 0 \
+  grep -qF -- '-f "inputs[ticket]=$TICKET" -f "inputs[pr]=$PR_NUMBER" -f "inputs[round]=$count"' <<< "$rework"
+# The gate spreads a clause over lines and the group keeps it on one: compare
+# with the whitespace collapsed.
+expect_output "the implementer's gate and its concurrency group both take a rework dispatch" 2 \
+  sh -c 'tr -s " \n" "  " | grep -oF "github.event.inputs.ticket && github.event.inputs.pr && github.event.inputs.round" | wc -l | tr -d " "' \
+  <<< "$implement"
+expect_status "the review job refuses a dispatch with a ticket" 0 \
+  grep -qF '&& !github.event.inputs.ticket' <<< "$review"
+for input in ticket pr round; do
+  expect_status "the stub template declares the \`$input\` input" 0 \
+    grep -qE "^      $input:$" "$here/../../templates/factory.yml"
+done
 
 finish
