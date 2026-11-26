@@ -494,13 +494,16 @@ jobs:
   # they never reset the rework cap: rounds are `factory/review` failures on
   # the PR's commits since an allowlisted human last added `agent:ready`
   # (scripts/review/rework-round). Past REWORK_CAP the ticket goes to a human
-  # instead. Only a fail on the PR's current head counts as a send-back, and
-  # only a ticket still `agent:in-review` is moved: a newer push gets its own
-  # review, and a ticket a human or a run has moved on is theirs. One rework
-  # per PR at a time, so two quick fails can't both send the ticket back. A break here turns the run red but
-  # leaves the verdict standing (report-failure doesn't wait on this job); a
-  # ticket left `agent:ready` by a failed dispatch waits for the implementer's
-  # daily backstop, with a comment saying so.
+  # instead. Only a fail on a PR still open, at its current head, counts as a
+  # send-back, and only a ticket still `agent:in-review` is moved: a closed PR
+  # is the owner's rejection (handback hands its ticket back, or the merge
+  # closed it), a newer push gets its own review, and a ticket a human or a run
+  # has moved on is theirs. A PR closed after this check is not caught (#41).
+  # One rework per PR at a time, so two quick fails can't both send the ticket
+  # back. A break here turns the run red but leaves the verdict standing
+  # (report-failure doesn't wait on this job); a ticket left `agent:ready` by a
+  # failed dispatch waits for the implementer's daily backstop, with a comment
+  # saying so.
   rework:
     needs: [review, post]
     if: needs.post.outputs.verdict == 'fail'
@@ -547,7 +550,13 @@ jobs:
         run: |
           set -o pipefail
           factory=.factory-plugin
-          head="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          # Captured first: a failure inside `read <<<` would be masked.
+          pr="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '"\(.state) \(.head.sha)"')"
+          read -r state head <<< "$pr"
+          if [ "$state" != "open" ]; then
+            echo "PR #$PR_NUMBER is $state; rework leaves its ticket alone." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$head" != "$HEAD_SHA" ]; then
             echo "PR #$PR_NUMBER moved on from $HEAD_SHA; its new head gets its own review." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
