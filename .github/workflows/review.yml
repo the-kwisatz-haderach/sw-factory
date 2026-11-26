@@ -9,7 +9,9 @@
 # and a review verdict. A second job then posts one `claude[bot]` comment
 # review with inline comments and sets the `factory/review` commit status on
 # the head SHA, `success` or `failure`, linking to the review. Both jobs
-# succeed either way, so a red job only ever means the run broke.
+# succeed either way, so a red job only ever means the run broke. A review
+# that hits the subscription's usage limit sets `factory/review` to `error`
+# instead: not a verdict, so the commit is reviewed again (docs/factory-design.md §10).
 #
 # The review never pushes code and never runs checks: the target repo's PR CI
 # is the deterministic gate, and runs alongside this without being read. The
@@ -61,6 +63,7 @@ jobs:
         shell: bash
     outputs:
       reviewed: ${{ steps.ruled.outputs.reviewed }}
+      usage_limited: ${{ steps.usage.outputs.limited }}
     env:
       GH_REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -179,6 +182,23 @@ jobs:
             --allowedTools "Read,Glob,Grep,Write,Skill,Agent,Task,TodoWrite,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git merge-base:*),Bash(ls:*)"
             --disallowedTools "Bash(git push:*),Bash(git commit:*),Bash(gh:*)"
 
+      # A review that ended on the usage limit is not a verdict (§10). The step
+      # fails the job whatever the agent step's own outcome, so no verdict is
+      # handed on or posted; report-usage-limit sets `error` instead.
+      # CLAUDE_CODE_RETRY_WATCHDOG stays unset, so the agent fails fast at the
+      # limit rather than waiting out the reset.
+      - name: Check for the usage limit
+        id: usage
+        if: always() && steps.claude.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+        run: |
+          if "$FACTORY/scripts/usage-limited" "$EXECUTION_FILE"; then
+            echo "limited=true" >> "$GITHUB_OUTPUT"
+            echo "::error::The agent hit the subscription's usage limit (rate_limit); no verdict."
+            exit 1
+          fi
+
       # The transcript, for seeing what the agent did and what it was denied
       # (docs/factory-design.md §11). A missing file is tolerated. It and the
       # job summary run after a failed, timed-out or cancelled agent step: its
@@ -218,10 +238,13 @@ jobs:
           FACTORY_SHA: ${{ job.workflow_sha }}
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
           JOB_STATUS: ${{ job.status }}
+          USAGE_LIMITED: ${{ steps.usage.outputs.limited }}
           ARTIFACT_NAME: review-transcript-${{ github.run_attempt }}
           ARTIFACT_URL: ${{ steps.transcript.outputs.artifact-url }}
         run: |
-          if [ "$JOB_STATUS" != "success" ]; then
+          if [ "$USAGE_LIMITED" = "true" ]; then
+            outcome="usage limit hit; \`factory/review\` set to \`error\`, not a verdict"
+          elif [ "$JOB_STATUS" != "success" ]; then
             outcome="\`failed\` (job $JOB_STATUS)"
           elif verdict="$("$FACTORY/scripts/review/read-outcome" "$RUN_DIR/outcome.json" "$RUNNER_TEMP/summary-description.txt" 2>/dev/null)"; then
             outcome="review verdict \`$verdict\`, which the post job sets as \`factory/review\` (\"$(cat "$RUNNER_TEMP/summary-description.txt")\")"
@@ -308,3 +331,28 @@ jobs:
             echo "Review verdict: \`$verdict\` ($(cat "$RUNNER_TEMP/description.txt"))"
             echo "Review: $review_url"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Usage limit: re-queue, not fail (§10). `error` is not a verdict, so the
+  # next push reviews the commit again (scripts/review/ruled), and so will
+  # the backstop once it re-reviews (#31).
+  # Set with GITHUB_TOKEN, whose events start no runs. Every other failure
+  # leaves the commit without a status.
+  report-usage-limit:
+    needs: review
+    if: failure() && needs.review.outputs.usage_limited == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Set factory/review to error
+        run: |
+          gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
+            -f state=error -f context=factory/review \
+            -f description="usage limit hit; not reviewed yet" \
+            -f target_url="$RUN_URL" > /dev/null

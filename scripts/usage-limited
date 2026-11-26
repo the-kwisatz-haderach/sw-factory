@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Usage: usage-limited <execution-file>
+# Exits 0 if the agent run in claude-code-action's execution file (a JSON
+# array of the run's SDK messages) ended on the subscription's usage limit:
+# the agent's last own assistant message (no `parent_tool_use_id`) carries
+# `"error": "rate_limit"`. Exits 1 otherwise, including when the file is
+# missing or unreadable.
+#
+# Only how the run ended counts. The SDK also puts `"error": "rate_limit"` on
+# an `api_retry` system message for a 429 it retries, and a sub-agent's
+# messages can carry it while the agent carries on; neither stopped the run.
+# The shape is the Agent SDK's `SDKAssistantMessageError`; a live run has yet
+# to confirm it (docs/factory-design.md §13 item 7).
+set -euo pipefail
+[ -f "${1:-}" ] || exit 1
+jq -e '
+  [.[] | objects | select(.type == "assistant" and .parent_tool_use_id == null)]
+  | last | .error? == "rate_limit"
+' "$1" >/dev/null 2>&1 || exit 1

@@ -15,6 +15,8 @@
 #   or a branch that changes the `## Checks` section → `agent:needs-human`
 # - anything that breaks the run (a failed step, a missing or malformed
 #   outcome file, a timeout, a cancel) → `agent:failed`, by `report-failure`
+# - an agent run that ended on the subscription's usage limit → back to
+#   `agent:ready` for the next backstop, by `report-failure` (§10)
 #
 # Brakes (docs/factory-design.md §10): one run in flight per repo and at most
 # one pending; at most DAILY_CAP runs claim a ticket per UTC day; and a run
@@ -80,6 +82,7 @@ jobs:
     outputs:
       ticket: ${{ steps.pick.outputs.ticket }}
       auth_failed: ${{ steps.auth.outputs.failed }}
+      usage_limited: ${{ steps.usage.outputs.limited }}
     env:
       # Deliberately no job-level GH_TOKEN: the agent step must not inherit a
       # token it could use to touch labels. Each bookkeeping step sets its own.
@@ -280,6 +283,23 @@ jobs:
             echo "::error::The Claude token was rejected (authentication_failed)."
           fi
 
+      # A run that ended on the usage limit is re-queued, not failed (§10).
+      # The step fails the job whatever the agent step's own outcome, so
+      # nothing below can push partial work or chain; report-failure moves the
+      # ticket back to `agent:ready`. CLAUDE_CODE_RETRY_WATCHDOG stays unset,
+      # so the agent fails fast at the limit rather than waiting out the reset.
+      - name: Check for the usage limit
+        id: usage
+        if: always() && env.TICKET != '' && steps.claude.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
+        run: |
+          if "$FACTORY/scripts/usage-limited" "$EXECUTION_FILE"; then
+            echo "limited=true" >> "$GITHUB_OUTPUT"
+            echo "::error::The agent hit the subscription's usage limit (rate_limit); the ticket is re-queued."
+            exit 1
+          fi
+
       # Deterministic from here on: the agent never pushes or touches labels.
       # Sets `route`: what happens next. The agent's `done` or `needs-human`,
       # or `checks-changed` when the branch changes `## Checks`. A missing or
@@ -474,13 +494,15 @@ jobs:
           EXECUTION_FILE: ${{ steps.claude.outputs.execution_file || format('{0}/claude-execution-output.json', runner.temp) }}
           JOB_STATUS: ${{ job.status }}
           ROUTE: ${{ steps.outcome.outputs.route }}
+          USAGE_LIMITED: ${{ steps.usage.outputs.limited }}
           ARTIFACT_NAME: implementer-transcript-${{ github.run_attempt }}
           ARTIFACT_URL: ${{ steps.transcript.outputs.artifact-url }}
         run: |
-          case "$JOB_STATUS:$ROUTE" in
-            success:done) outcome="\`done\`" ;;
-            success:needs-human) outcome="\`needs-human\`" ;;
-            success:checks-changed) outcome="\`needs-human\`: the branch changes \`CLAUDE.md\`'s \`## Checks\` section" ;;
+          case "$USAGE_LIMITED:$JOB_STATUS:$ROUTE" in
+            true:*) outcome="usage limit hit; \`agent:ready\` again for the next backstop" ;;
+            *:success:done) outcome="\`done\`" ;;
+            *:success:needs-human) outcome="\`needs-human\`" ;;
+            *:success:checks-changed) outcome="\`needs-human\`: the branch changes \`CLAUDE.md\`'s \`## Checks\` section" ;;
             *) outcome="\`failed\` (job ${JOB_STATUS}${ROUTE:+, after route \`$ROUTE\`})" ;;
           esac
           if [ -n "${PR_URL:-}" ]; then pr="$PR_URL"
@@ -509,7 +531,8 @@ jobs:
   # A separate job, because a timed-out or cancelled job skips its own
   # failure() steps (docs/factory-design.md §13 item 4). Any run that claimed a
   # ticket and then broke lands here; the steps that push are gated on a clean
-  # `done`, so nothing partial was pushed.
+  # `done`, so nothing partial was pushed. A run that hit the usage limit lands
+  # here too, but isn't a failure: its ticket goes back to `agent:ready`.
   report-failure:
     needs: implement
     if: (failure() || cancelled()) && needs.implement.outputs.ticket != ''
@@ -523,8 +546,20 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       TICKET: ${{ needs.implement.outputs.ticket }}
       AUTH_FAILED: ${{ needs.implement.outputs.auth_failed }}
+      USAGE_LIMITED: ${{ needs.implement.outputs.usage_limited }}
     steps:
+      # Re-queued, not failed (§10). The label is written with GITHUB_TOKEN,
+      # whose events start no runs, so the ticket waits for the next daily
+      # backstop: backoff with no shared state. The writer is
+      # github-actions[bot], not a human, so the rework cap isn't reset.
+      - name: Re-queue the ticket after the usage limit
+        if: env.AUTH_FAILED != 'true' && env.USAGE_LIMITED == 'true'
+        run: |
+          printf 'Usage limit hit, re-queued for the next backstop.\n\nRun: %s\n' "$RUN_URL" | gh issue comment "$TICKET" --body-file -
+          gh issue edit "$TICKET" --remove-label agent:in-progress --add-label agent:ready
+
       - name: Mark the ticket failed
+        if: env.AUTH_FAILED == 'true' || env.USAGE_LIMITED != 'true'
         run: |
           if [ "$AUTH_FAILED" = "true" ]; then
             reason="The Claude token was rejected (\`authentication_failed\`): it has expired or been revoked. Rotate the Claude token (\`CLAUDE_CODE_OAUTH_TOKEN\`), then re-add \`agent:ready\`."
