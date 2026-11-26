@@ -496,7 +496,7 @@ jobs:
   # per PR at a time, so two quick fails can't both send the ticket back. A break here turns the run red but
   # leaves the verdict standing (report-failure doesn't wait on this job); a
   # ticket left `agent:ready` by a failed dispatch waits for the implementer's
-  # daily backstop.
+  # daily backstop, with a comment saying so.
   rework:
     needs: [review, post]
     if: needs.post.outputs.verdict == 'fail'
@@ -523,6 +523,10 @@ jobs:
       PR_NUMBER: ${{ needs.review.outputs.pr_number }}
       HEAD_SHA: ${{ needs.review.outputs.head_sha }}
       REVIEW_URL: ${{ needs.post.outputs.review_url }}
+      # The owner is whoever may trigger the implementer. This input stands in
+      # for the implementer's, which this workflow can't read: the defaults
+      # are kept equal (scripts/test/review-dispatch-contract.test.sh), and a
+      # stub overrides both or neither.
       ALLOWLIST: ${{ inputs.allowlist }}
       # Automatic rounds before a human takes over (§10).
       REWORK_CAP: 2
@@ -580,8 +584,18 @@ jobs:
           # STUB_REF is "<owner>/<repo>/.github/workflows/<file>@<ref>".
           stub="${STUB_REF%%@*}"
           stub="${stub##*/}"
-          gh api -X POST "repos/$GH_REPO/actions/workflows/$stub/dispatches" -f ref="$DEFAULT_BRANCH" \
-            -f "inputs[ticket]=$TICKET" -f "inputs[pr]=$PR_NUMBER" -f "inputs[round]=$count" > /dev/null
+          # A failed dispatch leaves the ticket `agent:ready` for the daily
+          # backstop; the comment says so, since the red run is easy to miss.
+          if ! gh api -X POST "repos/$GH_REPO/actions/workflows/$stub/dispatches" -f ref="$DEFAULT_BRANCH" \
+              -f "inputs[ticket]=$TICKET" -f "inputs[pr]=$PR_NUMBER" -f "inputs[round]=$count" > /dev/null; then
+            gh issue comment "$TICKET" --body-file - <<EOF
+          The automated review failed PR #$PR_NUMBER (rework round $count of $REWORK_CAP), but dispatching the rework run failed. The ticket stays \`agent:ready\`, so the next daily backstop picks it up. Latest review: $REVIEW_URL
+
+          Run: $RUN_URL
+          EOF
+            echo "::error::Could not dispatch the rework run; ticket #$TICKET waits for the daily backstop."
+            exit 1
+          fi
           echo "Rework round $count of $REWORK_CAP: ticket #$TICKET is \`agent:ready\` again and \`$stub\` dispatched." \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

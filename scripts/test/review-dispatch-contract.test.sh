@@ -4,7 +4,9 @@
 # ticket as chaining, so without its `!github.event.inputs.pr` a backstop
 # review would also claim a ticket, silently. Rework dispatches with all three
 # inputs, which the implementer must take and the review must not. This pins
-# both sides of each, and the stub template's inputs.
+# both sides of each, and the stub template's inputs. Review's rework counts
+# rounds from the owners on its allowlist, standing in for the implementer's,
+# so the two defaults must match.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib.sh"
@@ -36,5 +38,9 @@ for input in ticket pr round; do
   expect_status "the stub template declares the \`$input\` input" 0 \
     grep -qE "^      $input:$" "$here/../../templates/factory.yml"
 done
+# The first `default:` after the `allowlist` input's key.
+default() { awk '/^      allowlist:$/ { in_input = 1 } in_input && /^        default:/ { print; exit }' "$workflows/$1"; }
+expect_status "both tasks default to the same allowlist" 0 \
+  sh -c '[ -n "$1" ] && [ "$1" = "$2" ]' _ "$(default implementer.yml)" "$(default review.yml)"
 
 finish

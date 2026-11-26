@@ -1,6 +1,8 @@
 # The factory stub. Copy it to a target repo as .github/workflows/factory.yml.
 # It only forwards: routing, the allowlist, timeouts and caps all live in the
 # factory's reusable workflows, so changing them never means touching this file.
+# To override the `allowlist` input, override it on both jobs with the same
+# value: review counts rework rounds from the implementer's owners.
 name: factory
 
 on:
