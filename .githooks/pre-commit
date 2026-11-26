@@ -3,4 +3,10 @@
 # Runs the factory repo's checks before every commit; `git commit --no-verify`
 # skips them, and CI runs them again anyway.
 set -euo pipefail
-exec "$(git rev-parse --show-toplevel)/scripts/check"
+root="$(git rev-parse --show-toplevel)"
+# Git hands a hook its own environment: for `commit -a`, GIT_INDEX_FILE points
+# at the commit's temporary index. The script tests run git in scratch repos,
+# and would write into that index (#40). The checks need none of it.
+# shellcheck disable=SC2046  # one variable name per word
+unset $(git rev-parse --local-env-vars)
+exec "$root/scripts/check"

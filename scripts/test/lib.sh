@@ -1,5 +1,10 @@
 # shellcheck shell=bash
 # Minimal assertions for the factory's bash tests.
+# A test runs git only in scratch repos of its own. Git's per-invocation
+# variables, inherited from a hook (GIT_INDEX_FILE for `commit -a`) or any
+# caller, would point those commands at the caller's repo instead (#40).
+# shellcheck disable=SC2046  # one variable name per word
+unset $(git rev-parse --local-env-vars)
 failures=0
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1"; failures=$((failures + 1)); }
